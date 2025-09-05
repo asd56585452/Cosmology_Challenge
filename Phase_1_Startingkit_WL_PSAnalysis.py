@@ -39,6 +39,11 @@ import zipfile
 import datetime
 import numpy as np
 import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from sklearn.model_selection import train_test_split
 # %matplotlib inline
 
 # %% [markdown]
@@ -405,257 +410,254 @@ print(f'Shape of the test data = {data_obj.kappa_test.shape}')
 # 
 # where k is the wavenumber corresponding to a scale $\lambda \sim 1/k$, and $ \delta_D$ is the Dirac delta function. Intuitively, P(k) tells us how "clumpy" the universe is on different scales. In cosmology, the shape and amplitude of P(k) encodes the physics and composition of the universe, making it one of the most important statistical tools in the field.
 # 
-# In this notebook we use power spectrum as the summary statistic to constrain the cosmological parameters.
+# In this notebook we use a CNN to constrain the cosmological parameters.
+
+# %% [markdown]
+# ### PyTorch Dataset Class
 
 # %%
-l_edge = np.logspace(2, 4, 11)
-Nbins = len(l_edge)-1
+class WeakLensingDataset(Dataset):
+    def __init__(self, kappa_data, label_data, mask, ng, pixelsize_arcmin, train=True):
+        self.train = train
+        self.mask = mask
+        self.ng = ng
+        self.pixelsize_arcmin = pixelsize_arcmin
+
+        # Flatten the data from (Ncosmo, Nsys, ...) to a single list of samples
+        self.maps = kappa_data.reshape(-1, *kappa_data.shape[2:])
+        self.labels = label_data.reshape(-1, *label_data.shape[2:])
+
+    def __len__(self):
+        return len(self.maps)
+
+    def __getitem__(self, idx):
+        map_data = self.maps[idx].astype(np.float64)
+        label = self.labels[idx,:2].astype(np.float32) # Only interested in the first 2 cosmological parameters
+
+        if self.train:
+            # Add noise on the fly for data augmentation
+            map_data = Utility.add_noise(
+                data=map_data,
+                mask=self.mask,
+                ng=self.ng,
+                pixel_size=self.pixelsize_arcmin
+            )
+
+        # Convert to torch tensors and add channel dimension for CNN
+        map_tensor = torch.from_numpy(map_data).float().unsqueeze(0)
+        label_tensor = torch.from_numpy(label).float()
+
+        return map_tensor, label_tensor
+
+# %% [markdown]
+# ### CNN Model Definition
 
 # %%
-def power_spectrum(x, pixsize, kedge):
+class CNN_Emulator(nn.Module):
+    def __init__(self):
+        super(CNN_Emulator, self).__init__()
+        self.conv_layers = nn.Sequential(
+            # Conv Block 1
+            nn.Conv2d(1, 16, kernel_size=5, stride=1, padding=2),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Conv Block 2
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            # Conv Block 3
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
+        # Calculate the size of the flattened features after conv layers
+        # Input image size: 1424x176
+        # After 3 maxpools (2x2): 1424/8 = 178, 176/8 = 22
+        self.fc_layers = nn.Sequential(
+            nn.Linear(64 * 178 * 22, 512),
+            nn.ReLU(),
+            nn.Linear(512, 4) # Output: mean_Om, log_var_Om, mean_S8, log_var_S8
+        )
+
+    def forward(self, x):
+        x = self.conv_layers(x)
+        x = x.view(x.size(0), -1) # Flatten
+        x = self.fc_layers(x)
+        return x
+
+# %% [markdown]
+# ### Loss Function
+
+# %%
+def gaussian_nll_loss(output, target):
     """
-    Compute the azimuthally averaged 2D power spectrum of a real-valued 2D field.
-
-    Parameters:
-    -----------
-    x : 2D numpy array
-        Input real-space map (e.g., an image or simulated field).
-        Must be a 2D array with shape (N_y, N_x).
-
-    pixsize : float
-        Physical size of each pixel in the map (e.g., arcmin, Mpc, etc.).
-        Units should be consistent with the units used for `kedge`.
-
-    kedge : 1D array-like
-        Bin edges in wavenumber space (k), used to bin the power spectrum.
-        Should be monotonically increasing and cover the k-range of interest.
-
-    Returns:
-    --------
-    power_k : 1D numpy array
-        The average wavenumber in each k bin (excluding the DC bin).
-
-    power : 1D numpy array
-        The binned, azimuthally averaged power spectrum corresponding to `power_k`.
-        Normalized per unit area.
+    Gaussian Negative Log-Likelihood loss.
+    The output tensor is expected to have 4 columns:
+    - 0: mean for Omega_m
+    - 1: log_var for Omega_m
+    - 2: mean for S_8
+    - 3: log_var for S_8
     """
+    # Separate means and log variances
+    mean_om, log_var_om = output[:, 0], output[:, 1]
+    mean_s8, log_var_s8 = output[:, 2], output[:, 3]
 
-    # Ensure the input array is 2D
-    assert x.ndim == 2
+    # Get targets
+    target_om, target_s8 = target[:, 0], target[:, 1]
 
-    # Compute the 2D FFT of the input map and take its squared magnitude (power spectrum)
-    xk = np.fft.rfft2(x)  # Real-to-complex FFT (along last axis)
-    xk2 = (xk * xk.conj()).real  # Power spectrum: |FFT|^2
+    # Calculate variance
+    var_om = torch.exp(log_var_om)
+    var_s8 = torch.exp(log_var_s8)
 
-    # Get the shape of the input map
-    Nmesh = x.shape
+    # Calculate loss for each parameter
+    loss_om = 0.5 * (log_var_om + (target_om - mean_om)**2 / var_om)
+    loss_s8 = 0.5 * (log_var_s8 + (target_s8 - mean_s8)**2 / var_s8)
 
-    # Compute the wavenumber grid (k-space)
-    k = np.zeros((Nmesh[0], Nmesh[1]//2+1))
-    # Square of the frequency in the first axis
-    k += np.fft.fftfreq(Nmesh[0], d=pixsize).reshape(-1, 1) ** 2
-    # Square of the frequency in the second axis (real FFT)
-    k += np.fft.rfftfreq(Nmesh[1], d=pixsize).reshape(1, -1) ** 2
-    # Convert from (1/length)^2 to angular frequency in radian units
-    k = k ** 0.5 * 2 * np.pi
-
-    # Bin each k value according to the bin edges provided in kedge
-    index = np.searchsorted(kedge, k)
-
-    # Bin the power values, number of modes, and wavenumbers
-    power = np.bincount(index.flatten(), weights=xk2.flatten())
-    Nmode = np.bincount(index.flatten())
-    power_k = np.bincount(index.flatten(), weights=k.flatten())
-
-    # Adjust for symmetry in the real FFT: include the mirrored part (excluding Nyquist frequency)
-    if Nmesh[1] % 2 == 0:  # Even number of columns
-        power += np.bincount(index[...,1:-1].flatten(), weights=xk2[...,1:-1].flatten())
-        Nmode += np.bincount(index[...,1:-1].flatten())
-        power_k += np.bincount(index[...,1:-1].flatten(), weights=k[...,1:-1].flatten())
-    else:  # Odd number of columns
-        power += np.bincount(index[...,1:].flatten(), weights=xk2[...,1:].flatten())
-        Nmode += np.bincount(index[...,1:].flatten())
-        power_k += np.bincount(index[...,1:].flatten(), weights=k[...,1:].flatten())
-
-    # Exclude the first bin (typically corresponds to DC mode)
-    power = power[1:len(kedge)]
-    Nmode = Nmode[1:len(kedge)]
-    power_k = power_k[1:len(kedge)]
-
-    # Average the power and wavenumber in each bin, only where Nmode > 0
-    select = Nmode > 0
-    power[select] = power[select] / Nmode[select]
-    power_k[select] = power_k[select] / Nmode[select]
-
-    # Normalize the power spectrum by the map area
-    power *= pixsize ** 2 / Nmesh[0] / Nmesh[1]
-
-    # Return the binned k values and corresponding power spectrum
-    return power_k, power
+    # Return the mean of the total loss
+    return (loss_om + loss_s8).mean()
 
 # %% [markdown]
-# ### Calculate the power spectrum for all maps
-
-# %%
-# This takes a few minutes
-Cl =  np.zeros((Ncosmo, Nsys, Nbins))
-
-for i in range(Ncosmo):
-    for j in range(Nsys):
-        l, Cl[i,j] = power_spectrum(Utility.add_noise(     # add_noise: Add noise to the noiseless training data
-            data=data_obj.kappa[i,j].astype(np.float64),
-            mask=data_obj.mask,
-            ng=data_obj.ng,
-            pixel_size=data_obj.pixelsize_arcmin
-        ), data_obj.pixelsize_radian, l_edge)
-
-Utility.save_np(data_dir=DATA_DIR, file_name="allPS.npy",data=Cl)
-
-# %% [markdown]
-# ### Mean power spectrum and covariance for $N_{\rm cosmo}$ cosmological model
-
-# %%
-# Here we use logCl instead of Cl as the summary statistics
-logCl = np.log10(Utility.load_np(data_dir=DATA_DIR, file_name="allPS.npy"))
-
-# mean power spectrum
-mean_logCl = np.mean(logCl, 1)
-Utility.save_np(data_dir=DATA_DIR, file_name="meanlogPS.npy",data=mean_logCl)
-
-# covariance matrix
-delta = (logCl - mean_logCl[:,None])
-cov_logCl = [(delta[i].T @ delta[i] / (len(delta[i])-delta.shape[-1]-2))[None] for i in range(Ncosmo)]
-cov_logCl = np.concatenate(cov_logCl, 0)
-Utility.save_np(data_dir=DATA_DIR, file_name="covlogPS.npy", data=cov_logCl)
-
-# %% [markdown]
-# ### Power spectrum emulator (linear interpolation between $N_{\rm cosmo}$ cosmological models)
-
-# %%
-from scipy.interpolate import LinearNDInterpolator
-
-# only uses cosmological parameters (the first two parameters) here. The other parameters are nuisance parameters and contain useful information. Here we marginalize the nuisance parameters by ignoring them.
-cosmology = data_obj.label[:,0,:2]
-mean_logCl = Utility.load_np(data_dir=DATA_DIR, file_name="meanlogPS.npy")
-cov_logCl = Utility.load_np(data_dir=DATA_DIR, file_name="covlogPS.npy")
-
-meanlogCl_interp = LinearNDInterpolator(cosmology, mean_logCl, fill_value=np.nan)
-covlogCl_interp = LinearNDInterpolator(cosmology, cov_logCl, fill_value=np.nan)
-
-# %% [markdown]
-# ### Define prior, likelihood, posterior
-
-# %%
-logprior_interp = LinearNDInterpolator(cosmology, np.zeros((Ncosmo, 1)), fill_value=-np.inf)
-
-# Note that the training data are not uniformly sampled, which introduces a prior distribution. Here we ignores that prior for simplicity.
-# Also note that this prior would introduce bias for cosmologies at the boundary at the prior
-def log_prior(x):
-    logprior = logprior_interp(x).flatten()
-    return logprior
-
-# Gaussian likelihood with interpolated mean and covariance matrix
-def loglike(x, logPS):
-    mean = meanlogCl_interp(x)
-    cov = covlogCl_interp(x)
-    delta = logPS - mean
-
-    inv_cov = np.linalg.inv(cov)
-    cov_det = np.linalg.slogdet(cov)[1]
-
-    return -0.5 * cov_det - 0.5 * np.einsum("ni,nij,nj->n", delta, inv_cov, delta)
-
-def logp_posterior(x, logPS):
-    logp = log_prior(x)
-    select = np.isfinite(logp)
-    if np.sum(select) > 0:
-        logp[select] = logp[select] + loglike(x[select], logPS[select])
-    return logp
+# ### Training and Validation
 
 # %% [markdown]
 # # 5 - Phase one inference
+# We will now train the CNN emulator.
+
+# %%
+# -- Hyperparameters --
+N_EPOCHS = 10 # Small number for a quick run
+BATCH_SIZE = 32
+LEARNING_RATE = 1e-4
+VAL_SPLIT = 0.2
+RANDOM_SEED = 42
+
+# -- Device Setup --
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# -- Data Splitting --
+# We split the data based on the nuisance parameter realizations (Nsys axis)
+Nsys = data_obj.Nsys
+indices = np.arange(Nsys)
+train_indices, val_indices = train_test_split(indices, test_size=VAL_SPLIT, random_state=RANDOM_SEED)
+
+# Create train and validation subsets of kappa and label
+kappa_train = data_obj.kappa[:, train_indices]
+label_train = data_obj.label[:, train_indices]
+kappa_val = data_obj.kappa[:, val_indices]
+label_val = data_obj.label[:, val_indices]
+
+# -- Create Datasets and DataLoaders --
+train_dataset = WeakLensingDataset(
+    kappa_data=kappa_train,
+    label_data=label_train,
+    mask=data_obj.mask,
+    ng=data_obj.ng,
+    pixelsize_arcmin=data_obj.pixelsize_arcmin,
+    train=True
+)
+
+val_dataset = WeakLensingDataset(
+    kappa_data=kappa_val,
+    label_data=label_val,
+    mask=data_obj.mask,
+    ng=data_obj.ng,
+    pixelsize_arcmin=data_obj.pixelsize_arcmin,
+    train=True # Add noise to validation as well to get a score estimate
+)
+
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+
+# -- Model, Optimizer --
+model = CNN_Emulator().to(device)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+# -- Training Loop --
+for epoch in range(N_EPOCHS):
+    # Training
+    model.train()
+    train_loss = 0.0
+    for maps, labels in train_loader:
+        maps, labels = maps.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+        outputs = model(maps)
+        loss = gaussian_nll_loss(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item() * maps.size(0)
+
+    train_loss /= len(train_loader.dataset)
+
+    # Validation
+    model.eval()
+    val_loss = 0.0
+    all_val_preds = []
+    all_val_labels = []
+    with torch.no_grad():
+        for maps, labels in val_loader:
+            maps, labels = maps.to(device), labels.to(device)
+            outputs = model(maps)
+            loss = gaussian_nll_loss(outputs, labels)
+            val_loss += loss.item() * maps.size(0)
+
+            # Store predictions and labels for scoring
+            all_val_preds.append(outputs.cpu().numpy())
+            all_val_labels.append(labels.cpu().numpy())
+
+    val_loss /= len(val_loader.dataset)
+
+    # Calculate validation score
+    all_val_preds = np.concatenate(all_val_preds, axis=0)
+    all_val_labels = np.concatenate(all_val_labels, axis=0)
+
+    pred_mean = all_val_preds[:, [0, 2]]
+    pred_log_var = all_val_preds[:, [1, 3]]
+    pred_errorbar = np.sqrt(np.exp(pred_log_var))
+
+    val_score = Score._score_phase1(
+        true_cosmo=all_val_labels,
+        infer_cosmo=pred_mean,
+        errorbar=pred_errorbar
+    )
+
+    print(f"Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+
 
 # %% [markdown]
-# ### Estimate power spectrum for all test data
+# ### Prediction on Test Set
 
 # %%
-test_Cl = np.zeros((data_obj.Ntest, Nbins))
+def predict(model, data_obj, device):
+    model.eval()
+    all_test_preds = []
 
-for i in range(data_obj.Ntest):
-    l, test_Cl[i] = power_spectrum(data_obj.kappa_test[i].astype(np.float64), data_obj.pixelsize_radian, l_edge)
+    # Create a simple dataloader for the test set
+    # The test data is already noisy. We don't need the custom dataset class here.
+    test_maps_tensor = torch.from_numpy(data_obj.kappa_test).float().unsqueeze(1)
+    test_dataset = torch.utils.data.TensorDataset(test_maps_tensor)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-test_logCl = np.log10(test_Cl)
+    with torch.no_grad():
+        for maps in test_loader:
+            maps = maps[0].to(device)
+            outputs = model(maps)
+            all_test_preds.append(outputs.cpu().numpy())
 
-# %% [markdown]
-# ### Sample the posterior!
+    all_test_preds = np.concatenate(all_test_preds, axis=0)
 
-# %%
-# MCMC sampling to explore the posterior distribution
+    # Extract mean and errorbar from predictions
+    mean = all_test_preds[:, [0, 2]]
+    log_var = all_test_preds[:, [1, 3]]
+    errorbar = np.sqrt(np.exp(log_var))
 
-Nstep = 100000   # Number of MCMC steps (iterations)
-sigma = 0.02     # Proposal standard deviation; should be tuned per method or parameter scale
+    return mean, errorbar
 
-# Randomly select initial points from the `cosmology` array for each test case
-# Assumes `cosmology` has shape (Ncosmo, ndim) and `Ntest` is the number of independent chains/samples
-current = cosmology[np.random.choice(Ncosmo, size=data_obj.Ntest)]
-
-# Compute log-posterior at the initial points
-curr_logprob = logp_posterior(current, test_logCl)
-
-# List to store sampled states (for all chains)
-states = []
-
-# Track total acceptance probabilities to compute acceptance rates
-total_acc = np.zeros(len(current))
-
-t = time.time()  # Track time for performance reporting
-
-# MCMC loop
-for i in range(Nstep):
-
-    # Generate proposals by adding Gaussian noise to current state
-    proposal = current + np.random.randn(*current.shape) * sigma
-
-    # Compute log-posterior at the proposed points
-    proposal_logprob = logp_posterior(proposal, test_logCl)
-
-    # Compute log acceptance ratio (Metropolis-Hastings)
-    acc_logprob = proposal_logprob - curr_logprob
-    acc_logprob[acc_logprob > 0] = 0  # Cap at 0 to avoid exp overflow (acceptance prob ≤ 1)
-
-    # Convert to acceptance probabilities
-    acc_prob = np.exp(acc_logprob)
-
-    # Decide whether to accept each proposal
-    acc = np.random.uniform(size=len(current)) < acc_prob
-
-    # Track acceptance probabilities (not binary outcomes)
-    total_acc += acc_prob
-
-    # Update states and log-probs where proposals are accepted
-    current[acc] = proposal[acc]
-    curr_logprob[acc] = proposal_logprob[acc]
-
-    # Save a copy of the current state
-    states.append(np.copy(current)[None])
-
-    # Periodically print progress and acceptance rates
-    if i % 1000 == 999:
-        print(
-            'step:', len(states),
-            'Time:', time.time() - t,
-            'Min acceptance rate:', np.min(total_acc / (i + 1)),
-            'Mean acceptance rate:', np.mean(total_acc / (i + 1))
-        )
-        t = time.time()  # Reset timer for next print interval
-
-# %%
-# remove burn-in
-states = np.concatenate(states[20000:], 0)
-
-# mean and std of samples
-mean = np.mean(states, 0)
-errorbar = np.std(states, 0)
+# Get final predictions
+print("Generating predictions on the test set...")
+mean, errorbar = predict(model, data_obj, device)
+print("Predictions generated.")
 
 # %% [markdown]
 # #### ⚠️ NOTE:
@@ -667,39 +669,7 @@ errorbar = np.std(states, 0)
 # ***
 
 # %% [markdown]
-# # 6 - (Optional) Evaluate the scores
-
-# %% [markdown]
-# ***
-# 
-# You can also test your predictions using a validation set split from the training data. To check the score of model predictions `mean` and `errorbar` on the validation set with labels `label_val`, simply use the `Score._score_phase1` function we provide to obtain the validation score.
-# 
-# #### ⚠️ NOTE:
-# - `label_val`: a 2D array containing ground truths of 2 cosmological parameters $\Omega^{\rm truth}_m$ and $S^{\rm truth}_8$.
-# 
-# To compute the score, the shapes of `label_val`, `mean`, and `errorbar` must be $(N_{\rm val}, 2)$, where $N_{\rm val}$ is the number of instances in your validation data.
-# 
-# ***
-
-# %%
-# Check if label_val has already been defined
-try:
-    label_val
-# If it has not been defined, print an error message
-except NameError:
-    print("You should define your validation set!")
-# If it has been defined, evaluate the score on the validation set
-else:
-    validation_score = Score._score_phase1(
-        true_cosmo=label_val,
-        infer_cosmo=mean,
-        errorbar=errorbar
-    )
-    print('averaged score:', np.mean(validation_score))
-    print('averaged error bar:', np.mean(errorbar, 0))
-
-# %% [markdown]
-# # 7 - (Optional) Prepare submission for Codabench
+# # 6 - (Optional) Prepare submission for Codabench
 
 # %% [markdown]
 # ***
