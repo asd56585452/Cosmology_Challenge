@@ -453,36 +453,90 @@ class WeakLensingDataset(Dataset):
 # ### CNN Model Definition
 
 # %%
-class CNN_Emulator(nn.Module):
-    def __init__(self):
-        super(CNN_Emulator, self).__init__()
-        self.conv_layers = nn.Sequential(
-            # Conv Block 1
-            nn.Conv2d(1, 16, kernel_size=5, stride=1, padding=2),
+class KerasStyleCNN(nn.Module):
+    def __init__(self, nf=32):
+        super(KerasStyleCNN, self).__init__()
+
+        self.features = nn.Sequential(
+            # Block 1
+            nn.Conv2d(1, nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(nf),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            # Conv Block 2
-            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(nf, nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(nf),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            # Conv Block 3
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+
+            # Block 2
+            nn.Conv2d(nf, 2 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(2 * nf),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        # Calculate the size of the flattened features after conv layers
-        # Input image size: 1424x176
-        # After 3 maxpools (2x2): 1424/8 = 178, 176/8 = 22
-        self.fc_layers = nn.Sequential(
-            nn.Linear(64 * 178 * 22, 512),
+            nn.Conv2d(2 * nf, 2 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(2 * nf),
             nn.ReLU(),
-            nn.Linear(512, 4) # Output: mean_Om, log_var_Om, mean_S8, log_var_S8
+            nn.AvgPool2d(kernel_size=2, stride=2),
+
+            # Block 3
+            nn.Conv2d(2 * nf, 4 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(4 * nf),
+            nn.ReLU(),
+            nn.Conv2d(4 * nf, 2 * nf, kernel_size=1, padding=0),
+            nn.BatchNorm2d(2 * nf),
+            nn.ReLU(),
+            nn.Conv2d(2 * nf, 4 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(4 * nf),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+
+            # Block 4
+            nn.Conv2d(4 * nf, 8 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(8 * nf),
+            nn.ReLU(),
+            nn.Conv2d(8 * nf, 4 * nf, kernel_size=1, padding=0),
+            nn.BatchNorm2d(4 * nf),
+            nn.ReLU(),
+            nn.Conv2d(4 * nf, 8 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(8 * nf),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+
+            # Block 5
+            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16 * nf),
+            nn.ReLU(),
+            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
+            nn.BatchNorm2d(8 * nf),
+            nn.ReLU(),
+            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16 * nf),
+            nn.ReLU(),
+            nn.AvgPool2d(kernel_size=2, stride=2),
+
+            # Block 6
+            nn.Conv2d(16 * nf, 16 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16 * nf),
+            nn.ReLU(),
+            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
+            nn.BatchNorm2d(8 * nf),
+            nn.ReLU(),
+            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16 * nf),
+            nn.ReLU(),
+            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
+            nn.BatchNorm2d(8 * nf),
+            nn.ReLU(),
+            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
+            nn.ReLU() # No BN before the final activation in this block
         )
 
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier = nn.Linear(16 * nf, 4) # Output 4 values for mean and log_var
+
     def forward(self, x):
-        x = self.conv_layers(x)
+        x = self.features(x)
+        x = self.pool(x)
         x = x.view(x.size(0), -1) # Flatten
-        x = self.fc_layers(x)
+        x = self.classifier(x)
         return x
 
 # %% [markdown]
@@ -525,8 +579,8 @@ def gaussian_nll_loss(output, target):
 
 # %%
 # -- Hyperparameters --
-N_EPOCHS = 10 # Small number for a quick run
-BATCH_SIZE = 32
+N_EPOCHS = 10 # A reasonable default
+BATCH_SIZE = 4 # Reduced batch size to prevent OOM error
 LEARNING_RATE = 1e-4
 VAL_SPLIT = 0.2
 RANDOM_SEED = 42
@@ -570,8 +624,8 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, nu
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
 # -- Model, Optimizer --
-model = CNN_Emulator().to(device)
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+model = KerasStyleCNN().to(device)
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
 
 # -- Training Loop --
 for epoch in range(N_EPOCHS):
