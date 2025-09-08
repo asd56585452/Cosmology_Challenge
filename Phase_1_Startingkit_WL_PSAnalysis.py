@@ -275,7 +275,7 @@ class Score:
 # \end{equation}
 # 
 # where k is the wavenumber corresponding to a scale $\lambda \sim 1/k$, and $ \delta_D$ is the Dirac delta function. Intuitively, P(k) tells us how "clumpy" the universe is on different scales. In cosmology, the shape and amplitude of P(k) encodes the physics and composition of the universe, making it one of the most important statistical tools in the field.
-# 
+#
 # In this notebook we use a CNN to constrain the cosmological parameters.
 
 # %% [markdown]
@@ -307,14 +307,7 @@ class WeakLensingDataset(Dataset):
         map_data = self.maps[cosmo_idx, sys_idx].astype(np.float64)
         label = self.labels[cosmo_idx, sys_idx, :2].astype(np.float32) # Only interested in the first 2 cosmological parameters
 
-        if self.train:
-            # Add noise on the fly for data augmentation
-            map_data = Utility.add_noise(
-                data=map_data,
-                mask=self.mask,
-                ng=self.ng,
-                pixel_size=self.pixelsize_arcmin
-            )
+        # Noise addition is now handled on the GPU in the training loop
 
         # Convert to torch tensors and add channel dimension for CNN
         map_tensor = torch.from_numpy(map_data).float().unsqueeze(0)
@@ -447,6 +440,24 @@ def gaussian_nll_loss(output, target):
 # ### Prediction on Test Set
 
 # %%
+def add_noise_torch(data, mask, ng, pixel_size=2.):
+    """
+    Add noise to a noiseless convergence map tensor on the GPU.
+
+    Parameters
+    ----------
+    data : torch.Tensor
+        Noiseless convergence map tensor.
+    mask : torch.Tensor
+        Binary mask map tensor.
+    ng : float
+        Number of galaxies per arcmin².
+    pixel_size : float, optional
+        Pixel size in arcminutes (default is 2.0).
+    """
+    noise = torch.randn_like(data) * 0.4 / (2 * ng * pixel_size**2)**0.5
+    return data + noise * mask
+
 def predict(model, data_obj, device, batch_size):
     model.eval()
     all_test_preds = []
@@ -631,6 +642,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Move mask to device
+    mask_tensor = torch.from_numpy(data_obj.mask).to(device)
+
     # -- Data Splitting --
     # We split the data based on the nuisance parameter realizations (Nsys axis)
     Nsys = data_obj.Nsys
@@ -679,8 +693,8 @@ def main():
     # With memory-mapping, we can use multiple workers on all platforms
     num_workers = 2
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
     # -- Model, Optimizer --
     model = KerasStyleCNN().to(device)
@@ -693,7 +707,10 @@ def main():
         model.train()
         train_loss = 0.0
         for maps, labels in train_loader:
-            maps, labels = maps.to(device), labels.to(device)
+            maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+
+            # Add noise on the GPU
+            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
 
             optimizer.zero_grad()
             outputs = model(maps)
@@ -711,7 +728,11 @@ def main():
         all_val_labels = []
         with torch.no_grad():
             for maps, labels in val_loader:
-                maps, labels = maps.to(device), labels.to(device)
+                maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+
+                # Add noise on the GPU for validation as well
+                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+
                 outputs = model(maps)
                 loss = gaussian_nll_loss(outputs, labels)
                 val_loss += loss.item() * maps.size(0)
