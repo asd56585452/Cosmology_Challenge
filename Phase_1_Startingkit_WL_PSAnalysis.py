@@ -661,8 +661,11 @@ def main():
         train=True # Add noise to validation as well to get a score estimate
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    # Set num_workers to 0 on Windows to avoid pickling errors
+    num_workers = 0 if os.name == 'nt' else 2
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers)
 
     # -- Model, Optimizer --
     model = KerasStyleCNN().to(device)
