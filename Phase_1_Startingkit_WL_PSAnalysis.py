@@ -491,7 +491,7 @@ def main():
     USE_PUBLIC_DATASET = False
 
     # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = '[DEFINE THE PATH OF SAVED PUBLIC DATA HERE]'  # This is only required when you set USE_PUBLIC_DATASET = True
+    PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
 
     # %%
     if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
@@ -620,8 +620,8 @@ def main():
 
     # %%
     # -- Hyperparameters --
-    N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 4 # Reduced batch size to prevent OOM error
+    N_EPOCHS = 100 # A reasonable default. User may need to adjust for full training runs.
+    BATCH_SIZE = 64 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-4
     VAL_SPLIT = 0.2
     RANDOM_SEED = 42
