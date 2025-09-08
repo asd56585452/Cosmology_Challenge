@@ -423,16 +423,23 @@ class WeakLensingDataset(Dataset):
         self.ng = ng
         self.pixelsize_arcmin = pixelsize_arcmin
 
-        # Flatten the data from (Ncosmo, Nsys, ...) to a single list of samples
-        self.maps = kappa_data.reshape(-1, *kappa_data.shape[2:])
-        self.labels = label_data.reshape(-1, *label_data.shape[2:])
+        # Store data without reshaping to save memory
+        self.maps = kappa_data
+        self.labels = label_data
+
+        self.Ncosmo = self.maps.shape[0]
+        self.Nsys = self.maps.shape[1]
 
     def __len__(self):
-        return len(self.maps)
+        return self.Ncosmo * self.Nsys
 
     def __getitem__(self, idx):
-        map_data = self.maps[idx].astype(np.float64)
-        label = self.labels[idx,:2].astype(np.float32) # Only interested in the first 2 cosmological parameters
+        # Calculate 2D index from flat index
+        cosmo_idx = idx // self.Nsys
+        sys_idx = idx % self.Nsys
+
+        map_data = self.maps[cosmo_idx, sys_idx].astype(np.float64)
+        label = self.labels[cosmo_idx, sys_idx, :2].astype(np.float32) # Only interested in the first 2 cosmological parameters
 
         if self.train:
             # Add noise on the fly for data augmentation
@@ -579,7 +586,7 @@ def gaussian_nll_loss(output, target):
 
 # %%
 # -- Hyperparameters --
-N_EPOCHS = 10 # A reasonable default
+N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
 BATCH_SIZE = 4 # Reduced batch size to prevent OOM error
 LEARNING_RATE = 1e-4
 VAL_SPLIT = 0.2
