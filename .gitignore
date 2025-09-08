@@ -32,3 +32,6 @@ submissions/
 input_data/allPS.npy
 input_data/meanlogPS.npy
 input_data/covlogPS.npy
+
+# Ignore temporary data files for memory-mapping
+temp_data/

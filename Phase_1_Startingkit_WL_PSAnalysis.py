@@ -44,6 +44,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+import shutil
 # %matplotlib inline
 
 # %% [markdown]
@@ -282,15 +283,15 @@ class Score:
 
 # %%
 class WeakLensingDataset(Dataset):
-    def __init__(self, kappa_data, label_data, mask, ng, pixelsize_arcmin, train=True):
+    def __init__(self, kappa_path, label_path, mask, ng, pixelsize_arcmin, train=True):
         self.train = train
         self.mask = mask
         self.ng = ng
         self.pixelsize_arcmin = pixelsize_arcmin
 
-        # Store data without reshaping to save memory
-        self.maps = kappa_data
-        self.labels = label_data
+        # Open the numpy arrays using memory-mapping
+        self.maps = np.load(kappa_path, mmap_mode='r')
+        self.labels = np.load(label_path, mmap_mode='r')
 
         self.Ncosmo = self.maps.shape[0]
         self.Nsys = self.maps.shape[1]
@@ -491,7 +492,7 @@ def main():
     USE_PUBLIC_DATASET = False
 
     # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = os.path.join(root_dir, 'public_data/')  # This is only required when you set USE_PUBLIC_DATASET = True
+    PUBLIC_DATA_DIR = '[DEFINE THE PATH OF SAVED PUBLIC DATA HERE]'  # This is only required when you set USE_PUBLIC_DATASET = True
 
     # %%
     if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
@@ -642,10 +643,24 @@ def main():
     kappa_val = data_obj.kappa[:, val_indices]
     label_val = data_obj.label[:, val_indices]
 
+    # -- Save split data to temporary files for memory-mapped access --
+    temp_dir = './temp_data'
+    os.makedirs(temp_dir, exist_ok=True)
+
+    kappa_train_path = os.path.join(temp_dir, 'kappa_train.npy')
+    label_train_path = os.path.join(temp_dir, 'label_train.npy')
+    kappa_val_path = os.path.join(temp_dir, 'kappa_val.npy')
+    label_val_path = os.path.join(temp_dir, 'label_val.npy')
+
+    np.save(kappa_train_path, kappa_train)
+    np.save(label_train_path, label_train)
+    np.save(kappa_val_path, kappa_val)
+    np.save(label_val_path, label_val)
+
     # -- Create Datasets and DataLoaders --
     train_dataset = WeakLensingDataset(
-        kappa_data=kappa_train,
-        label_data=label_train,
+        kappa_path=kappa_train_path,
+        label_path=label_train_path,
         mask=data_obj.mask,
         ng=data_obj.ng,
         pixelsize_arcmin=data_obj.pixelsize_arcmin,
@@ -653,16 +668,16 @@ def main():
     )
 
     val_dataset = WeakLensingDataset(
-        kappa_data=kappa_val,
-        label_data=label_val,
+        kappa_path=kappa_val_path,
+        label_path=label_val_path,
         mask=data_obj.mask,
         ng=data_obj.ng,
         pixelsize_arcmin=data_obj.pixelsize_arcmin,
         train=True # Add noise to validation as well to get a score estimate
     )
 
-    # Set num_workers to 0 on Windows to avoid pickling errors
-    num_workers = 0 if os.name == 'nt' else 2
+    # With memory-mapping, we can use multiple workers on all platforms
+    num_workers = 2
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers)
@@ -734,41 +749,47 @@ def main():
     print("Loading best model for prediction...")
     model.load_state_dict(torch.load('best_model.pth'))
 
-    # Get final predictions
-    print("Generating predictions on the test set...")
-    mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
-    print("Predictions generated.")
+    try:
+        # Get final predictions
+        print("Generating predictions on the test set...")
+        mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
+        print("Predictions generated.")
 
-    # %% [markdown]
-    # #### ⚠️ NOTE:
-    # - `mean`: a 2D array containing the point estimates of 2 cosmological parameters $\hat{\Omega}_m$ and $\hat{S}_8$.
-    # - `errorbar`: a 2D array containing the one-standard deviation uncertainties of 2 cosmological parameters $\hat{\sigma}_{\Omega_m}$ and  $\hat{\sigma}_{S_8}$.
-    #
-    # The shapes of `mean`, and `errorbar` must be $(N_{\rm test}, 2)$.
-    #
-    # ***
+        # %% [markdown]
+        # #### ⚠️ NOTE:
+        # - `mean`: a 2D array containing the point estimates of 2 cosmological parameters $\hat{\Omega}_m$ and $\hat{S}_8$.
+        # - `errorbar`: a 2D array containing the one-standard deviation uncertainties of 2 cosmological parameters $\hat{\sigma}_{\Omega_m}$ and  $\hat{\sigma}_{S_8}$.
+        #
+        # The shapes of `mean`, and `errorbar` must be $(N_{\rm test}, 2)$.
+        #
+        # ***
 
-    # %% [markdown]
-    # # 6 - (Optional) Prepare submission for Codabench
+        # %% [markdown]
+        # # 6 - (Optional) Prepare submission for Codabench
 
-    # %% [markdown]
-    # ***
-    #
-    # This section will save the model predictions `mean` and `errorbar` (both are 2D arrays with shape `(4000, 2)`, where `4000` is the number of test instances and `2` is the number of our parameters of interest) as a dictionary in a JSON file `result.json`. Then it will compress `result.json` into a zip file that can be directly submitted to Codabench.
-    #
-    # ***
+        # %% [markdown]
+        # ***
+        #
+        # This section will save the model predictions `mean` and `errorbar` (both are 2D arrays with shape `(4000, 2)`, where `4000` is the number of test instances and `2` is the number of our parameters of interest) as a dictionary in a JSON file `result.json`. Then it will compress `result.json` into a zip file that can be directly submitted to Codabench.
+        #
+        # ***
 
-    # %%
-    data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
-    the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
-    zip_file_name = 'Submission_' + the_date + '.zip'
-    zip_file = Utility.save_json_zip(
-        submission_dir="submissions",
-        json_file_name="result.json",
-        zip_file_name=zip_file_name,
-        data=data
-    )
-    print(f"Submission ZIP saved at: {zip_file}")
+        # %%
+        data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
+        the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
+        zip_file_name = 'Submission_' + the_date + '.zip'
+        zip_file = Utility.save_json_zip(
+            submission_dir="submissions",
+            json_file_name="result.json",
+            zip_file_name=zip_file_name,
+            data=data
+        )
+        print(f"Submission ZIP saved at: {zip_file}")
+    finally:
+        # Clean up temporary files
+        print("Cleaning up temporary data files...")
+        shutil.rmtree(temp_dir)
+        print("Cleanup complete.")
 
 if __name__ == '__main__':
     main()
