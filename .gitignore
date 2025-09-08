@@ -21,3 +21,14 @@ input_data.zip
 PowerSpectrumAnalysis.ipynb
 generate_dummy_submission.py
 /public_data
+
+# Ignore generated model files
+best_model.pth
+
+# Ignore submission files
+submissions/
+
+# Ignore generated data from old power spectrum script
+input_data/allPS.npy
+input_data/meanlogPS.npy
+input_data/covlogPS.npy

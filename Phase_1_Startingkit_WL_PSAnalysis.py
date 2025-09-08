@@ -672,6 +672,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
 
     # -- Training Loop --
+    best_val_score = -np.inf
     for epoch in range(N_EPOCHS):
         # Training
         model.train()
@@ -722,6 +723,16 @@ def main():
 
         print(f"Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
 
+        # Check if this is the best model so far
+        if val_score > best_val_score:
+            best_val_score = val_score
+            print(f"  New best model found! Score: {best_val_score:.4f}. Saving model...")
+            torch.save(model.state_dict(), 'best_model.pth')
+
+
+    # Load the best model for final prediction
+    print("Loading best model for prediction...")
+    model.load_state_dict(torch.load('best_model.pth'))
 
     # Get final predictions
     print("Generating predictions on the test set...")
