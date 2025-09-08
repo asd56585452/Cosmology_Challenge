@@ -491,7 +491,7 @@ def main():
     USE_PUBLIC_DATASET = False
 
     # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = '[DEFINE THE PATH OF SAVED PUBLIC DATA HERE]'  # This is only required when you set USE_PUBLIC_DATASET = True
+    PUBLIC_DATA_DIR = os.path.join(root_dir, 'public_data/')  # This is only required when you set USE_PUBLIC_DATASET = True
 
     # %%
     if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
