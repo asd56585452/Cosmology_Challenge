@@ -516,10 +516,10 @@ def main():
     # **Option 2: To load the entire training data and test data:** Set `USE_PUBLIC_DATASET = True` and specify a path where you will save the downloaded public data from Codabench. In the entire training data, there are $N_{\rm cosmo}=101$ cosmological models and $N_{\rm sys}=256$ realizations of nuisance parameters. The entire test data contains $N_{\rm test}=4000$ instances.
 
     # %%
-    USE_PUBLIC_DATASET = False
+    USE_PUBLIC_DATASET = True
 
     # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = '[DEFINE THE PATH OF SAVED PUBLIC DATA HERE]'  # This is only required when you set USE_PUBLIC_DATASET = True
+    PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
 
     # %%
     if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
@@ -647,8 +647,8 @@ def main():
 
     # %%
     # -- Hyperparameters --
-    N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 4 # Reduced batch size to prevent OOM error
+    N_EPOCHS = 20 # A reasonable default. User may need to adjust for full training runs.
+    BATCH_SIZE = 8 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-4
     VAL_SPLIT = 0.2
     RANDOM_SEED = 42
@@ -688,10 +688,10 @@ def main():
     )
 
     # With memory-mapping, we can use multiple workers on all platforms
-    num_workers = 2
+    num_workers = 0
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=False)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=False)
 
     # -- Model, Optimizer --
     model = KerasStyleCNN().to(device)
