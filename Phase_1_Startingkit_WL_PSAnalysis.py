@@ -44,6 +44,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 import shutil
 # %matplotlib inline
 
@@ -706,7 +707,8 @@ def main():
         # Training
         model.train()
         train_loss = 0.0
-        for maps, labels in train_loader:
+        train_iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Train]")
+        for maps, labels in train_iterator:
             maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
             # Add noise on the GPU
@@ -727,7 +729,8 @@ def main():
         all_val_preds = []
         all_val_labels = []
         with torch.no_grad():
-            for maps, labels in val_loader:
+            val_iterator = tqdm(val_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Val]")
+            for maps, labels in val_iterator:
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
 
                 # Add noise on the GPU for validation as well
