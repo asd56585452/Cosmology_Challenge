@@ -501,7 +501,7 @@ def main():
     # **Option 2: To load the entire training data and test data:** Set `USE_PUBLIC_DATASET = True` and specify a path where you will save the downloaded public data from Codabench. In the entire training data, there are $N_{\rm cosmo}=101$ cosmological models and $N_{\rm sys}=256$ realizations of nuisance parameters. The entire test data contains $N_{\rm test}=4000$ instances.
 
     # %%
-    USE_PUBLIC_DATASET = True
+    USE_PUBLIC_DATASET = False
 
     # USE_PUBLIC_DATASET = True
     PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
@@ -633,8 +633,8 @@ def main():
 
     # %%
     # -- Hyperparameters --
-    N_EPOCHS = 100 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 32 # Reduced batch size to prevent OOM error
+    N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
+    BATCH_SIZE = 4 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-4
     VAL_SPLIT = 0.2
     RANDOM_SEED = 42
