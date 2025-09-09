@@ -284,15 +284,15 @@ class Score:
 
 # %%
 class WeakLensingDataset(Dataset):
-    def __init__(self, kappa_path, label_path, mask, ng, pixelsize_arcmin, train=True):
+    def __init__(self, kappa_path, label_path, mask_path, ng, pixelsize_arcmin, train=True):
         self.train = train
-        self.mask = mask
         self.ng = ng
         self.pixelsize_arcmin = pixelsize_arcmin
 
         # Open the numpy arrays using memory-mapping
         self.maps = np.load(kappa_path, mmap_mode='r')
         self.labels = np.load(label_path, mmap_mode='r')
+        self.mask = np.load(mask_path, mmap_mode='r')
 
         self.Ncosmo = self.maps.shape[0]
         self.Nsys = self.maps.shape[1]
@@ -501,10 +501,10 @@ def main():
     # **Option 2: To load the entire training data and test data:** Set `USE_PUBLIC_DATASET = True` and specify a path where you will save the downloaded public data from Codabench. In the entire training data, there are $N_{\rm cosmo}=101$ cosmological models and $N_{\rm sys}=256$ realizations of nuisance parameters. The entire test data contains $N_{\rm test}=4000$ instances.
 
     # %%
-    USE_PUBLIC_DATASET = False
+    USE_PUBLIC_DATASET = True
 
     # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = '[DEFINE THE PATH OF SAVED PUBLIC DATA HERE]'  # This is only required when you set USE_PUBLIC_DATASET = True
+    PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
 
     # %%
     if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
@@ -633,8 +633,8 @@ def main():
 
     # %%
     # -- Hyperparameters --
-    N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 4 # Reduced batch size to prevent OOM error
+    N_EPOCHS = 100 # A reasonable default. User may need to adjust for full training runs.
+    BATCH_SIZE = 32 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-4
     VAL_SPLIT = 0.2
     RANDOM_SEED = 42
@@ -666,17 +666,19 @@ def main():
     label_train_path = os.path.join(temp_dir, 'label_train.npy')
     kappa_val_path = os.path.join(temp_dir, 'kappa_val.npy')
     label_val_path = os.path.join(temp_dir, 'label_val.npy')
+    mask_path = os.path.join(temp_dir, 'mask.npy')
 
     np.save(kappa_train_path, kappa_train)
     np.save(label_train_path, label_train)
     np.save(kappa_val_path, kappa_val)
     np.save(label_val_path, label_val)
+    np.save(mask_path, data_obj.mask)
 
     # -- Create Datasets and DataLoaders --
     train_dataset = WeakLensingDataset(
         kappa_path=kappa_train_path,
         label_path=label_train_path,
-        mask=data_obj.mask,
+        mask_path=mask_path,
         ng=data_obj.ng,
         pixelsize_arcmin=data_obj.pixelsize_arcmin,
         train=True
@@ -685,7 +687,7 @@ def main():
     val_dataset = WeakLensingDataset(
         kappa_path=kappa_val_path,
         label_path=label_val_path,
-        mask=data_obj.mask,
+        mask_path=mask_path,
         ng=data_obj.ng,
         pixelsize_arcmin=data_obj.pixelsize_arcmin,
         train=True # Add noise to validation as well to get a score estimate
