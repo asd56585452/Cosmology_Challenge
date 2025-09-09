@@ -284,29 +284,44 @@ class Score:
 
 # %%
 class WeakLensingDataset(Dataset):
-    def __init__(self, kappa_path, label_path, mask_path, ng, pixelsize_arcmin, train=True):
+    def __init__(self, kappa_path, label_path, sys_indices, data_obj, train=True):
         self.train = train
-        self.ng = ng
-        self.pixelsize_arcmin = pixelsize_arcmin
+        self.mask = data_obj.mask
+        self.ng = data_obj.ng
+        self.pixelsize_arcmin = data_obj.pixelsize_arcmin
+        self.shape = data_obj.shape
+        self.Nsys_total = data_obj.Nsys # Total number of systematics in the full dataset
 
-        # Open the numpy arrays using memory-mapping
-        self.maps = np.load(kappa_path, mmap_mode='r')
+        # Store the list of system indices for this dataset (train or val)
+        self.sys_indices = sys_indices
+
+        # Open the complete, but flattened, numpy arrays using memory-mapping
+        self.flat_maps = np.load(kappa_path, mmap_mode='r')
         self.labels = np.load(label_path, mmap_mode='r')
-        self.mask = np.load(mask_path, mmap_mode='r')
 
-        self.Ncosmo = self.maps.shape[0]
-        self.Nsys = self.maps.shape[1]
+        self.Ncosmo = self.labels.shape[0]
+        self.Nsys_per_cosmo = len(self.sys_indices)
+        self.unmasked_size = np.sum(self.mask)
 
     def __len__(self):
-        return self.Ncosmo * self.Nsys
+        return self.Ncosmo * self.Nsys_per_cosmo
 
     def __getitem__(self, idx):
         # Calculate 2D index from flat index
-        cosmo_idx = idx // self.Nsys
-        sys_idx = idx % self.Nsys
+        cosmo_idx = idx // self.Nsys_per_cosmo
+        list_idx = idx % self.Nsys_per_cosmo
 
-        map_data = self.maps[cosmo_idx, sys_idx].astype(np.float64)
-        label = self.labels[cosmo_idx, sys_idx, :2].astype(np.float32) # Only interested in the first 2 cosmological parameters
+        # Look up the original system index from our list
+        original_sys_idx = self.sys_indices[list_idx]
+
+        # Get the 1D slice of unmasked data for the specific map
+        data_slice = self.flat_maps[cosmo_idx, original_sys_idx]
+
+        # Reconstruct the 2D image on the fly
+        map_data = np.zeros(self.shape, dtype=np.float64)
+        map_data[self.mask] = data_slice
+
+        label = self.labels[cosmo_idx, original_sys_idx, :2].astype(np.float32)
 
         # Noise addition is now handled on the GPU in the training loop
 
@@ -504,7 +519,7 @@ def main():
     USE_PUBLIC_DATASET = False
 
     # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
+    PUBLIC_DATA_DIR = '[DEFINE THE PATH OF SAVED PUBLIC DATA HERE]'  # This is only required when you set USE_PUBLIC_DATASET = True
 
     # %%
     if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
@@ -519,10 +534,11 @@ def main():
     # Initialize Data class object
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
 
-    # Load train data
-    data_obj.load_train_data()
-
-    # Load test data
+    # Load only the mask and test data in the main process. The training data will be
+    # memory-mapped by the Dataset workers.
+    data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
+    if data_obj.USE_PUBLIC_DATASET: # The viz_label is only available for the public dataset
+        data_obj.viz_label = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.viz_label_file)
     data_obj.load_test_data()
 
     # %% [markdown]
@@ -549,9 +565,7 @@ def main():
     print(f'There are {Ncosmo} cosmological models, each has {Nsys} realizations of nuisance parameters in the training data.')
 
     # %%
-    print(f'Shape of the training data = {data_obj.kappa.shape}')
     print(f'Shape of the mask = {data_obj.mask.shape}')
-    print(f'Shape of the training label = {data_obj.label.shape}')
     print(f'Shape of the test data = {data_obj.kappa_test.shape}')
 
     # %% [markdown]
@@ -643,8 +657,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Move mask to device
-    mask_tensor = torch.from_numpy(data_obj.mask).to(device)
+    # Move mask to device and add batch/channel dimensions for broadcasting
+    mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
 
     # -- Data Splitting --
     # We split the data based on the nuisance parameter realizations (Nsys axis)
@@ -652,44 +666,24 @@ def main():
     indices = np.arange(Nsys)
     train_indices, val_indices = train_test_split(indices, test_size=VAL_SPLIT, random_state=RANDOM_SEED)
 
-    # Create train and validation subsets of kappa and label
-    kappa_train = data_obj.kappa[:, train_indices]
-    label_train = data_obj.label[:, train_indices]
-    kappa_val = data_obj.kappa[:, val_indices]
-    label_val = data_obj.label[:, val_indices]
-
-    # -- Save split data to temporary files for memory-mapped access --
-    temp_dir = './temp_data'
-    os.makedirs(temp_dir, exist_ok=True)
-
-    kappa_train_path = os.path.join(temp_dir, 'kappa_train.npy')
-    label_train_path = os.path.join(temp_dir, 'label_train.npy')
-    kappa_val_path = os.path.join(temp_dir, 'kappa_val.npy')
-    label_val_path = os.path.join(temp_dir, 'label_val.npy')
-    mask_path = os.path.join(temp_dir, 'mask.npy')
-
-    np.save(kappa_train_path, kappa_train)
-    np.save(label_train_path, label_train)
-    np.save(kappa_val_path, kappa_val)
-    np.save(label_val_path, label_val)
-    np.save(mask_path, data_obj.mask)
+    # Define paths to the full, original data files
+    kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
+    label_path = os.path.join(DATA_DIR, data_obj.label_file)
 
     # -- Create Datasets and DataLoaders --
     train_dataset = WeakLensingDataset(
-        kappa_path=kappa_train_path,
-        label_path=label_train_path,
-        mask_path=mask_path,
-        ng=data_obj.ng,
-        pixelsize_arcmin=data_obj.pixelsize_arcmin,
+        kappa_path=kappa_path,
+        label_path=label_path,
+        sys_indices=train_indices,
+        data_obj=data_obj,
         train=True
     )
 
     val_dataset = WeakLensingDataset(
-        kappa_path=kappa_val_path,
-        label_path=label_val_path,
-        mask_path=mask_path,
-        ng=data_obj.ng,
-        pixelsize_arcmin=data_obj.pixelsize_arcmin,
+        kappa_path=kappa_path,
+        label_path=label_path,
+        sys_indices=val_indices,
+        data_obj=data_obj,
         train=True # Add noise to validation as well to get a score estimate
     )
 
@@ -775,47 +769,41 @@ def main():
     print("Loading best model for prediction...")
     model.load_state_dict(torch.load('best_model.pth'))
 
-    try:
-        # Get final predictions
-        print("Generating predictions on the test set...")
-        mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
-        print("Predictions generated.")
+    # Get final predictions
+    print("Generating predictions on the test set...")
+    mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
+    print("Predictions generated.")
 
-        # %% [markdown]
-        # #### ⚠️ NOTE:
-        # - `mean`: a 2D array containing the point estimates of 2 cosmological parameters $\hat{\Omega}_m$ and $\hat{S}_8$.
-        # - `errorbar`: a 2D array containing the one-standard deviation uncertainties of 2 cosmological parameters $\hat{\sigma}_{\Omega_m}$ and  $\hat{\sigma}_{S_8}$.
-        #
-        # The shapes of `mean`, and `errorbar` must be $(N_{\rm test}, 2)$.
-        #
-        # ***
+    # %% [markdown]
+    # #### ⚠️ NOTE:
+    # - `mean`: a 2D array containing the point estimates of 2 cosmological parameters $\hat{\Omega}_m$ and $\hat{S}_8$.
+    # - `errorbar`: a 2D array containing the one-standard deviation uncertainties of 2 cosmological parameters $\hat{\sigma}_{\Omega_m}$ and  $\hat{\sigma}_{S_8}$.
+    #
+    # The shapes of `mean`, and `errorbar` must be $(N_{\rm test}, 2)$.
+    #
+    # ***
 
-        # %% [markdown]
-        # # 6 - (Optional) Prepare submission for Codabench
+    # %% [markdown]
+    # # 6 - (Optional) Prepare submission for Codabench
 
-        # %% [markdown]
-        # ***
-        #
-        # This section will save the model predictions `mean` and `errorbar` (both are 2D arrays with shape `(4000, 2)`, where `4000` is the number of test instances and `2` is the number of our parameters of interest) as a dictionary in a JSON file `result.json`. Then it will compress `result.json` into a zip file that can be directly submitted to Codabench.
-        #
-        # ***
+    # %% [markdown]
+    # ***
+    #
+    # This section will save the model predictions `mean` and `errorbar` (both are 2D arrays with shape `(4000, 2)`, where `4000` is the number of test instances and `2` is the number of our parameters of interest) as a dictionary in a JSON file `result.json`. Then it will compress `result.json` into a zip file that can be directly submitted to Codabench.
+    #
+    # ***
 
-        # %%
-        data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
-        the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
-        zip_file_name = 'Submission_' + the_date + '.zip'
-        zip_file = Utility.save_json_zip(
-            submission_dir="submissions",
-            json_file_name="result.json",
-            zip_file_name=zip_file_name,
-            data=data
-        )
-        print(f"Submission ZIP saved at: {zip_file}")
-    finally:
-        # Clean up temporary files
-        print("Cleaning up temporary data files...")
-        shutil.rmtree(temp_dir)
-        print("Cleanup complete.")
+    # %%
+    data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
+    the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
+    zip_file_name = 'Submission_' + the_date + '.zip'
+    zip_file = Utility.save_json_zip(
+        submission_dir="submissions",
+        json_file_name="result.json",
+        zip_file_name=zip_file_name,
+        data=data
+    )
+    print(f"Submission ZIP saved at: {zip_file}")
 
 if __name__ == '__main__':
     main()
