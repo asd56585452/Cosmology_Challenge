@@ -321,7 +321,7 @@ class WeakLensingDataset(Dataset):
         map_data = np.zeros(self.shape, dtype=np.float64)
         map_data[self.mask] = data_slice
 
-        label = self.labels[cosmo_idx, original_sys_idx, :2].astype(np.float32)
+        label = self.labels[cosmo_idx, original_sys_idx, :].astype(np.float32)
 
         # Noise addition is now handled on the GPU in the training loop
 
@@ -412,7 +412,7 @@ class KerasStyleCNN(nn.Module):
         )
 
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Linear(16 * nf, 4) # Output 4 values for mean and log_var
+        self.classifier = nn.Linear(16 * nf, 7) # Output 4 values for mean and log_var, and 3 for nuisance parameters
 
     def forward(self, x):
         x = self.features(x)
@@ -451,6 +451,28 @@ def gaussian_nll_loss(output, target):
 
     # Return the mean of the total loss
     return (loss_om + loss_s8).mean()
+
+
+def multi_task_loss(output, target, nuisance_loss_weight=1.0):
+    """
+    Multi-task loss combining Gaussian NLL for cosmology and MSE for nuisance parameters.
+    - output: (batch, 7) tensor from model
+    - target: (batch, 5) tensor of labels
+    """
+    # --- Cosmological Parameters Loss (Gaussian NLL) ---
+    # output[:, :4] -> [mean_om, log_var_om, mean_s8, log_var_s8]
+    # target[:, :2] -> [true_om, true_s8]
+    cosmo_loss = gaussian_nll_loss(output[:, :4], target[:, :2])
+
+    # --- Nuisance Parameters Loss (MSE) ---
+    # output[:, 4:] -> [pred_nuis1, pred_nuis2, pred_nuis3]
+    # target[:, 2:] -> [true_nuis1, true_nuis2, true_nuis3]
+    nuisance_loss = torch.nn.functional.mse_loss(output[:, 4:], target[:, 2:])
+
+    # --- Total Weighted Loss ---
+    total_loss = cosmo_loss + nuisance_loss_weight * nuisance_loss
+
+    return total_loss
 
 # %% [markdown]
 # ### Prediction on Test Set
@@ -716,7 +738,7 @@ def main():
                 maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
                 optimizer.zero_grad()
                 outputs = model(maps)
-                loss = gaussian_nll_loss(outputs, labels)
+                loss = multi_task_loss(outputs, labels)
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item() * maps.size(0)
@@ -733,7 +755,7 @@ def main():
                     maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
                     maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
                     outputs = model(maps)
-                    loss = gaussian_nll_loss(outputs, labels)
+                    loss = multi_task_loss(outputs, labels)
                     val_loss += loss.item() * maps.size(0)
                     all_val_preds.append(outputs.cpu().numpy())
                     all_val_labels.append(labels.cpu().numpy())
@@ -746,7 +768,7 @@ def main():
             pred_log_var = all_val_preds[:, [1, 3]]
             pred_errorbar = np.sqrt(np.exp(pred_log_var))
             val_score = Score._score_phase1(
-                true_cosmo=all_val_labels,
+                true_cosmo=all_val_labels[:, :2],
                 infer_cosmo=pred_mean,
                 errorbar=pred_errorbar
             )
