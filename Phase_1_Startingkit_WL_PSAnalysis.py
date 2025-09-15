@@ -44,6 +44,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.utils import resample
 from tqdm import tqdm
 import shutil
 # %matplotlib inline
@@ -474,30 +475,33 @@ def add_noise_torch(data, mask, ng, pixel_size=2.):
     noise = torch.randn_like(data) * 0.4 / (2 * ng * pixel_size**2)**0.5
     return data + noise * mask
 
-def predict(model, data_obj, device, batch_size):
-    model.eval()
-    all_test_preds = []
+def predict(model_paths, data_obj, device, batch_size):
+    all_model_preds = []
 
-    # Create a simple dataloader for the test set
-    # The test data is already noisy. We don't need the custom dataset class here.
     test_maps_tensor = torch.from_numpy(data_obj.kappa_test).float().unsqueeze(1)
     test_dataset = torch.utils.data.TensorDataset(test_maps_tensor)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
-    with torch.no_grad():
-        for maps in test_loader:
-            maps = maps[0].to(device)
-            outputs = model(maps)
-            all_test_preds.append(outputs.cpu().numpy())
+    for model_path in model_paths:
+        print(f"Loading model: {model_path}")
+        model = KerasStyleCNN().to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.eval()
 
-    all_test_preds = np.concatenate(all_test_preds, axis=0)
+        current_model_preds = []
+        with torch.no_grad():
+            for maps in test_loader:
+                maps = maps[0].to(device)
+                outputs = model(maps)
+                current_model_preds.append(outputs.cpu().numpy())
 
-    # Extract mean and errorbar from predictions
-    mean = all_test_preds[:, [0, 2]]
-    log_var = all_test_preds[:, [1, 3]]
-    errorbar = np.sqrt(np.exp(log_var))
+        all_model_preds.append(np.concatenate(current_model_preds, axis=0))
 
-    return mean, errorbar
+    # Stack predictions along a new axis (models, samples, outputs)
+    all_model_preds = np.stack(all_model_preds)
+
+    # all_model_preds has shape (N_ENSEMBLE, N_test, 4)
+    return all_model_preds
 
 def main():
     root_dir = os.getcwd()
@@ -647,6 +651,7 @@ def main():
 
     # %%
     # -- Hyperparameters --
+    N_ENSEMBLE = 5 # Number of models in the ensemble
     N_EPOCHS = 30 # A reasonable default. User may need to adjust for full training runs.
     BATCH_SIZE = 8 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-5
@@ -664,21 +669,15 @@ def main():
     # We split the data based on the nuisance parameter realizations (Nsys axis)
     Nsys = data_obj.Nsys
     indices = np.arange(Nsys)
-    train_indices, val_indices = train_test_split(indices, test_size=VAL_SPLIT, random_state=RANDOM_SEED)
+
+    # We create a single validation set, which will be used for all models in the ensemble
+    base_train_indices, val_indices = train_test_split(indices, test_size=VAL_SPLIT, random_state=RANDOM_SEED)
 
     # Define paths to the full, original data files
     kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
     label_path = os.path.join(DATA_DIR, data_obj.label_file)
 
-    # -- Create Datasets and DataLoaders --
-    train_dataset = WeakLensingDataset(
-        kappa_path=kappa_path,
-        label_path=label_path,
-        sys_indices=train_indices,
-        data_obj=data_obj,
-        train=True
-    )
-
+    # Create the validation dataset, which is fixed for all models
     val_dataset = WeakLensingDataset(
         kappa_path=kappa_path,
         label_path=label_path,
@@ -686,93 +685,127 @@ def main():
         data_obj=data_obj,
         train=True # Add noise to validation as well to get a score estimate
     )
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
 
-    # With memory-mapping, we can use multiple workers on all platforms
-    num_workers = 0
+    # --- Ensemble Training Loop ---
+    for i in range(N_ENSEMBLE):
+        print(f"\n--- Training Model {i+1}/{N_ENSEMBLE} ---")
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=False)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=False)
+        # Set a new random seed for each model for weight initialization and data shuffling
+        model_seed = RANDOM_SEED + i
+        torch.manual_seed(model_seed)
+        np.random.seed(model_seed)
 
-    # -- Model, Optimizer --
-    model = KerasStyleCNN().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+        # Create a bootstrap sample for the training data
+        train_indices = resample(base_train_indices, replace=True, random_state=model_seed)
 
-    # -- Training Loop --
-    best_val_score = -np.inf
-    for epoch in range(N_EPOCHS):
-        # Training
-        model.train()
-        train_loss = 0.0
-        train_iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Train]")
-        for maps, labels in train_iterator:
-            maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        # -- Create Datasets and DataLoaders for the current model --
+        train_dataset = WeakLensingDataset(
+            kappa_path=kappa_path,
+            label_path=label_path,
+            sys_indices=train_indices,
+            data_obj=data_obj,
+            train=True
+        )
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
 
-            # Add noise on the GPU
-            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+        # -- Model, Optimizer --
+        model = KerasStyleCNN().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
 
-            optimizer.zero_grad()
-            outputs = model(maps)
-            loss = gaussian_nll_loss(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * maps.size(0)
+        # -- Training Loop for one model --
+        best_val_score = -np.inf
+        model_path = f'best_model_{i}.pth'
 
-        train_loss /= len(train_loader.dataset)
-
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        all_val_preds = []
-        all_val_labels = []
-        with torch.no_grad():
-            val_iterator = tqdm(val_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Val]")
-            for maps, labels in val_iterator:
+        for epoch in range(N_EPOCHS):
+            # Training
+            model.train()
+            train_loss = 0.0
+            train_iterator = tqdm(train_loader, desc=f"Model {i+1} Epoch {epoch+1}/{N_EPOCHS} [Train]")
+            for maps, labels in train_iterator:
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-
-                # Add noise on the GPU for validation as well
                 maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
-
+                optimizer.zero_grad()
                 outputs = model(maps)
                 loss = gaussian_nll_loss(outputs, labels)
-                val_loss += loss.item() * maps.size(0)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * maps.size(0)
+            train_loss /= len(train_loader.dataset)
 
-                # Store predictions and labels for scoring
-                all_val_preds.append(outputs.cpu().numpy())
-                all_val_labels.append(labels.cpu().numpy())
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            all_val_preds = []
+            all_val_labels = []
+            with torch.no_grad():
+                val_iterator = tqdm(val_loader, desc=f"Model {i+1} Epoch {epoch+1}/{N_EPOCHS} [Val]")
+                for maps, labels in val_iterator:
+                    maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                    maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+                    outputs = model(maps)
+                    loss = gaussian_nll_loss(outputs, labels)
+                    val_loss += loss.item() * maps.size(0)
+                    all_val_preds.append(outputs.cpu().numpy())
+                    all_val_labels.append(labels.cpu().numpy())
+            val_loss /= len(val_loader.dataset)
 
-        val_loss /= len(val_loader.dataset)
+            # Calculate validation score
+            all_val_preds = np.concatenate(all_val_preds, axis=0)
+            all_val_labels = np.concatenate(all_val_labels, axis=0)
+            pred_mean = all_val_preds[:, [0, 2]]
+            pred_log_var = all_val_preds[:, [1, 3]]
+            pred_errorbar = np.sqrt(np.exp(pred_log_var))
+            val_score = Score._score_phase1(
+                true_cosmo=all_val_labels,
+                infer_cosmo=pred_mean,
+                errorbar=pred_errorbar
+            )
 
-        # Calculate validation score
-        all_val_preds = np.concatenate(all_val_preds, axis=0)
-        all_val_labels = np.concatenate(all_val_labels, axis=0)
+            print(f"Model {i+1} Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
 
-        pred_mean = all_val_preds[:, [0, 2]]
-        pred_log_var = all_val_preds[:, [1, 3]]
-        pred_errorbar = np.sqrt(np.exp(pred_log_var))
+            if val_score > best_val_score:
+                best_val_score = val_score
+                print(f"  New best score for model {i+1}: {best_val_score:.4f}. Saving model to {model_path}...")
+                torch.save(model.state_dict(), model_path)
 
-        val_score = Score._score_phase1(
-            true_cosmo=all_val_labels,
-            infer_cosmo=pred_mean,
-            errorbar=pred_errorbar
-        )
+    # --- Ensemble Prediction and Aggregation ---
+    print("\n--- Generating and Aggregating Ensemble Predictions ---")
 
-        print(f"Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+    model_paths = [f'best_model_{i}.pth' for i in range(N_ENSEMBLE)]
 
-        # Check if this is the best model so far
-        if val_score > best_val_score:
-            best_val_score = val_score
-            print(f"  New best model found! Score: {best_val_score:.4f}. Saving model...")
-            torch.save(model.state_dict(), 'best_model.pth')
+    # Get predictions from all models: shape (N_ENSEMBLE, N_test, 4)
+    all_preds = predict(model_paths, data_obj, device, BATCH_SIZE)
 
+    # Separate means and log_vars
+    # means_all_models has shape (N_ENSEMBLE, N_test, 2)
+    means_all_models = all_preds[:, :, [0, 2]]
+    # log_vars_all_models has shape (N_ENSEMBLE, N_test, 2)
+    log_vars_all_models = all_preds[:, :, [1, 3]]
 
-    # Load the best model for final prediction
-    print("Loading best model for prediction...")
-    model.load_state_dict(torch.load('best_model.pth'))
+    # 1. Calculate final ensemble mean
+    # ens_mean has shape (N_test, 2)
+    ens_mean = np.mean(means_all_models, axis=0)
 
-    # Get final predictions
-    print("Generating predictions on the test set...")
-    mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
-    print("Predictions generated.")
+    # 2. Calculate final ensemble variance
+    # First, get aleatoric variance for each model
+    aleatoric_vars = np.exp(log_vars_all_models) # shape (N_ENSEMBLE, N_test, 2)
+
+    # Average aleatoric variance across models
+    # avg_aleatoric_var has shape (N_test, 2)
+    avg_aleatoric_var = np.mean(aleatoric_vars, axis=0)
+
+    # Calculate epistemic variance (variance of the means)
+    # epistemic_var has shape (N_test, 2)
+    epistemic_var = np.var(means_all_models, axis=0)
+
+    # Total variance is the sum of the two
+    total_variance = avg_aleatoric_var + epistemic_var
+
+    # The errorbar for submission is the standard deviation
+    ens_errorbar = np.sqrt(total_variance)
+
+    print("Ensemble predictions generated and aggregated.")
 
     # %% [markdown]
     # #### ⚠️ NOTE:
@@ -794,7 +827,7 @@ def main():
     # ***
 
     # %%
-    data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
+    data = {"means": ens_mean.tolist(), "errorbars": ens_errorbar.tolist()}
     the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
     zip_file_name = 'Submission_' + the_date + '.zip'
     zip_file = Utility.save_json_zip(
