@@ -673,7 +673,7 @@ def main():
     # %%
     # -- Hyperparameters --
     N_SPLITS = 5 # For 5-fold cross-validation
-    N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
+    N_EPOCHS = 5 # A reasonable default. User may need to adjust for full training runs.
     BATCH_SIZE = 8 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-5
     RANDOM_SEED = 42
