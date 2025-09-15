@@ -43,8 +43,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
-from sklearn.utils import resample
+from sklearn.model_selection import train_test_split, KFold
 from tqdm import tqdm
 import shutil
 # %matplotlib inline
@@ -651,11 +650,10 @@ def main():
 
     # %%
     # -- Hyperparameters --
-    N_ENSEMBLE = 5 # Number of models in the ensemble
+    N_SPLITS = 5 # For 5-fold cross-validation
     N_EPOCHS = 30 # A reasonable default. User may need to adjust for full training runs.
     BATCH_SIZE = 8 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-5
-    VAL_SPLIT = 0.2
     RANDOM_SEED = 42
 
     # -- Device Setup --
@@ -665,63 +663,54 @@ def main():
     # Move mask to device and add batch/channel dimensions for broadcasting
     mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
 
-    # -- Data Splitting --
-    # We split the data based on the nuisance parameter realizations (Nsys axis)
+    # -- Data Splitting with K-Fold --
     Nsys = data_obj.Nsys
     indices = np.arange(Nsys)
-
-    # We create a single validation set, which will be used for all models in the ensemble
-    base_train_indices, val_indices = train_test_split(indices, test_size=VAL_SPLIT, random_state=RANDOM_SEED)
+    kf = KFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_SEED)
 
     # Define paths to the full, original data files
     kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
     label_path = os.path.join(DATA_DIR, data_obj.label_file)
 
-    # Create the validation dataset, which is fixed for all models
-    val_dataset = WeakLensingDataset(
-        kappa_path=kappa_path,
-        label_path=label_path,
-        sys_indices=val_indices,
-        data_obj=data_obj,
-        train=True # Add noise to validation as well to get a score estimate
-    )
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+    # --- K-Fold Cross-Validation Training Loop ---
+    for fold, (train_indices, val_indices) in enumerate(kf.split(indices)):
+        print(f"\n--- Training Fold {fold+1}/{N_SPLITS} ---")
 
-    # --- Ensemble Training Loop ---
-    for i in range(N_ENSEMBLE):
-        print(f"\n--- Training Model {i+1}/{N_ENSEMBLE} ---")
+        # Set a different seed for each fold to ensure different weight initializations
+        torch.manual_seed(RANDOM_SEED + fold)
+        np.random.seed(RANDOM_SEED + fold)
 
-        # Set a new random seed for each model for weight initialization and data shuffling
-        model_seed = RANDOM_SEED + i
-        torch.manual_seed(model_seed)
-        np.random.seed(model_seed)
-
-        # Create a bootstrap sample for the training data
-        train_indices = resample(base_train_indices, replace=True, random_state=model_seed)
-
-        # -- Create Datasets and DataLoaders for the current model --
+        # -- Create Datasets and DataLoaders for the current fold --
         train_dataset = WeakLensingDataset(
             kappa_path=kappa_path,
             label_path=label_path,
-            sys_indices=train_indices,
+            sys_indices=indices[train_indices],
             data_obj=data_obj,
             train=True
         )
+        val_dataset = WeakLensingDataset(
+            kappa_path=kappa_path,
+            label_path=label_path,
+            sys_indices=indices[val_indices],
+            data_obj=data_obj,
+            train=True # Add noise to validation as well
+        )
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
 
         # -- Model, Optimizer --
         model = KerasStyleCNN().to(device)
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
 
-        # -- Training Loop for one model --
+        # -- Training Loop for one fold --
         best_val_score = -np.inf
-        model_path = f'best_model_{i}.pth'
+        model_path = f'best_model_fold_{fold}.pth'
 
         for epoch in range(N_EPOCHS):
             # Training
             model.train()
             train_loss = 0.0
-            train_iterator = tqdm(train_loader, desc=f"Model {i+1} Epoch {epoch+1}/{N_EPOCHS} [Train]")
+            train_iterator = tqdm(train_loader, desc=f"Fold {fold+1} Epoch {epoch+1}/{N_EPOCHS} [Train]")
             for maps, labels in train_iterator:
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
                 maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
@@ -739,7 +728,7 @@ def main():
             all_val_preds = []
             all_val_labels = []
             with torch.no_grad():
-                val_iterator = tqdm(val_loader, desc=f"Model {i+1} Epoch {epoch+1}/{N_EPOCHS} [Val]")
+                val_iterator = tqdm(val_loader, desc=f"Fold {fold+1} Epoch {epoch+1}/{N_EPOCHS} [Val]")
                 for maps, labels in val_iterator:
                     maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
                     maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
@@ -762,17 +751,17 @@ def main():
                 errorbar=pred_errorbar
             )
 
-            print(f"Model {i+1} Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+            print(f"Fold {fold+1} Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
 
             if val_score > best_val_score:
                 best_val_score = val_score
-                print(f"  New best score for model {i+1}: {best_val_score:.4f}. Saving model to {model_path}...")
+                print(f"  New best score for fold {fold+1}: {best_val_score:.4f}. Saving model to {model_path}...")
                 torch.save(model.state_dict(), model_path)
 
     # --- Ensemble Prediction and Aggregation ---
     print("\n--- Generating and Aggregating Ensemble Predictions ---")
 
-    model_paths = [f'best_model_{i}.pth' for i in range(N_ENSEMBLE)]
+    model_paths = [f'best_model_fold_{i}.pth' for i in range(N_SPLITS)]
 
     # Get predictions from all models: shape (N_ENSEMBLE, N_test, 4)
     all_preds = predict(model_paths, data_obj, device, BATCH_SIZE)
