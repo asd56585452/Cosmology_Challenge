@@ -652,7 +652,7 @@ def main():
     # -- Hyperparameters --
     N_SPLITS = 5 # For 5-fold cross-validation
     N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 8 # Reduced batch size to prevent OOM error
+    BATCH_SIZE = 16 # Reduced batch size to prevent OOM error
     LEARNING_RATE = 1e-5
     RANDOM_SEED = 42
 
@@ -695,8 +695,8 @@ def main():
             data_obj=data_obj,
             train=True # Add noise to validation as well
         )
-        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0, pin_memory=True)
-        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0, pin_memory=True)
+        train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True,persistent_workers=True)
+        val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True,persistent_workers=True)
 
         # -- Model, Optimizer --
         model = KerasStyleCNN().to(device)
