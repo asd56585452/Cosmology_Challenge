@@ -774,9 +774,9 @@ def main():
     # %%
     # -- Hyperparameters --
     N_SPLITS = 5 # For 5-fold cross-validation
-    N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
+    N_EPOCHS = 30 # A reasonable default. User may need to adjust for full training runs.
     BATCH_SIZE = 16 # Reduced batch size to prevent OOM error
-    LEARNING_RATE = 1e-5
+    LEARNING_RATE = 1e-4
     RANDOM_SEED = 42
 
     # -- Device Setup --
@@ -823,7 +823,8 @@ def main():
 
         # -- Model, Optimizer --
         model = convnext_pico_custom().to(device)
-        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+        optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=N_EPOCHS * len(train_loader))
 
         # -- Training Loop for one fold --
         best_val_score = -np.inf
@@ -842,6 +843,7 @@ def main():
                 loss = gaussian_nll_loss(outputs, labels)
                 loss.backward()
                 optimizer.step()
+                scheduler.step()
                 train_loss += loss.item() * maps.size(0)
             train_loss /= len(train_loader.dataset)
 
