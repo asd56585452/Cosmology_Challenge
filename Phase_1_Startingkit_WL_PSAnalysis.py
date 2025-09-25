@@ -38,7 +38,6 @@ import time
 import zipfile
 import datetime
 import numpy as np
-import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -169,50 +168,6 @@ class Data:
     def load_test_data(self):
         self.kappa_test = np.zeros((self.Ntest, *self.shape), dtype=np.float16)
         self.kappa_test[:,self.mask] = Utility.load_np(data_dir=self.data_dir, file_name=self.test_kappa_file) # Test noisy convergence maps
-
-# %% [markdown]
-# ### Visualization
-
-# %%
-class Visualization:
-
-    @staticmethod
-    def plot_mask(mask):
-        plt.figure(figsize=(30,100))
-        plt.imshow(mask.T)
-        plt.show()
-
-    @staticmethod
-    def plot_noiseless_training_convergence_map(kappa):
-        plt.figure(figsize=(30,100))
-        plt.imshow(kappa[0,0].T, vmin=-0.02, vmax=0.07)
-        plt.show()
-
-    @staticmethod
-    def plot_noisy_training_convergence_map(kappa, mask, pixelsize_arcmin, ng):
-        plt.figure(figsize=(30,100))
-        plt.imshow(Utility.add_noise(kappa[0,0], mask, ng, pixelsize_arcmin).T, vmin=-0.02, vmax=0.07)
-        plt.show()
-
-    @staticmethod
-    def plot_cosmological_parameters_OmegaM_S8(label):
-        plt.scatter(label[:,0,0], label[:,0,1])
-        plt.xlabel(r'$\Omega_m$')
-        plt.ylabel(r'$S_8$')
-        plt.show()
-
-    @staticmethod
-    def plot_baryonic_physics_parameters(label):
-        plt.scatter(label[0,:,2], label[0,:,3])
-        plt.xlabel(r'$T_{\mathrm{AGN}}$')
-        plt.ylabel(r'$f_0$')
-        plt.show()
-
-    @staticmethod
-    def plot_photometric_redshift_uncertainty_parameters(label):
-        plt.hist(label[0,:,4], bins=20)
-        plt.xlabel(r'$\Delta z$')
-        plt.show()
 
 # %% [markdown]
 # ### Scoring function
