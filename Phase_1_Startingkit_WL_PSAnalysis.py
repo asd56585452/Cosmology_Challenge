@@ -48,9 +48,9 @@ import shutil
 # %matplotlib inline
 
 # NNI Imports for Neural Architecture Search
-from nni.nas.hub.pytorch import MobileNetV3Space  # From Hub import predefined search space
-from nni.nas.evaluator.pytorch import RetiariiEvaluator # Evaluator, used to wrap training logic
-from nni.nas.strategy import ProxylessNAS # Directly import search strategy
+from nni.nas.hub.pytorch import MobileNetV3Space      # From Hub import predefined search space
+from nni.nas.evaluator import FunctionalEvaluator     # The new evaluator for custom training functions
+from nni.nas.strategy import ProxylessNAS             # Directly import search strategy
 
 # %% [markdown]
 # # 1 - Helper Classes for
@@ -426,10 +426,14 @@ def gaussian_nll_loss(output, target):
 # ### NAS Trainer Function
 
 # %%
-def nas_trainer(model, optimizer, criterion, train_loader, val_loader, epochs, device, data_obj):
+def nas_trainer(model, learning_rate, weight_decay, criterion, train_loader, val_loader, epochs, device, data_obj):
     """
-    A simple training and evaluation function that will be called by the Evaluator.
+    A simple training and evaluation function that will be called by the FunctionalEvaluator.
+    The model is passed as the first argument, and other parameters are passed as keyword arguments.
     """
+    # Create the optimizer inside the trainer, as it's model-dependent
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
     # Move mask to device and add batch/channel dimensions for broadcasting
     mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
 
@@ -728,17 +732,19 @@ def main():
         model_space = CustomSearchSpace().to(device)
 
         # 2. Create the evaluator
-        evaluator = RetiariiEvaluator(
-            training_func=lambda model: nas_trainer(
-                model=model,
-                optimizer=optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5),
-                criterion=gaussian_nll_loss,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                epochs=5, # Each model is only trained for a few epochs during search
-                device=device,
-                data_obj=data_obj
-            )
+        # The new FunctionalEvaluator takes the training function directly,
+        # and its arguments are passed as keyword arguments. The optimizer
+        # will be created inside the trainer function.
+        evaluator = FunctionalEvaluator(
+            nas_trainer,
+            learning_rate=LEARNING_RATE,
+            weight_decay=5e-5,
+            criterion=gaussian_nll_loss,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            epochs=5,  # Each model is only trained for a few epochs during search
+            device=device,
+            data_obj=data_obj
         )
 
         # 3. Instantiate the ProxylessNAS strategy
