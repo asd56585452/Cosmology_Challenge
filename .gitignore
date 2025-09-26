@@ -36,4 +36,3 @@ input_data/covlogPS.npy
 # Ignore temporary data files for memory-mapping
 temp_data/
 *.pth
-public_data.zip

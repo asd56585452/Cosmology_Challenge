@@ -50,7 +50,7 @@ from nni.nas.hub.pytorch import DARTS as DartsSpace
 from nni.nas.strategy import DARTS as DartsStrategy
 from nni.nas.experiment import NasExperiment
 from nni.nas.evaluator.pytorch import Lightning, Trainer
-from nni.nas.evaluator.pytorch import ClassificationModule
+from nni.nas.evaluator.pytorch.lightning import SupervisedLearningModule
 from nni.nas.space import model_context
 # %matplotlib inline
 
@@ -347,9 +347,10 @@ class CustomDartsSpace(DartsSpace):
 # ### NNI Darts Module
 
 # %%
-class NniDartsModule(ClassificationModule):
+class NniDartsModule(SupervisedLearningModule):
     def __init__(self, learning_rate=1e-3, weight_decay=0.):
-        super().__init__(learning_rate=learning_rate, weight_decay=weight_decay)
+        super().__init__(criterion=gaussian_nll_loss, metrics=None,
+                         learning_rate=learning_rate, weight_decay=weight_decay)
 
     def training_step(self, batch, batch_idx):
         x, y = batch
