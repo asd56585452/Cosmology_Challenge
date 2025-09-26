@@ -471,7 +471,7 @@ def main():
     # **Option 2: To load the entire training data and test data:** Set `USE_PUBLIC_DATASET = True` and specify a path where you will save the downloaded public data from Codabench. In the entire training data, there are $N_{\rm cosmo}=101$ cosmological models and $N_{\rm sys}=256$ realizations of nuisance parameters. The entire test data contains $N_{\rm test}=4000$ instances.
 
     # %%
-    USE_PUBLIC_DATASET = False
+    USE_PUBLIC_DATASET = True
 
     # USE_PUBLIC_DATASET = True
     PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
