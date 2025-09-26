@@ -47,6 +47,11 @@ from tqdm import tqdm
 import shutil
 # %matplotlib inline
 
+# NNI Imports for Neural Architecture Search
+from nni.nas.hub.pytorch import MobileNetV3Space  # From Hub import predefined search space
+from nni.nas.evaluator.pytorch import RetiariiEvaluator # Evaluator, used to wrap training logic
+from nni.nas.strategy import ProxylessNAS # Directly import search strategy
+
 # %% [markdown]
 # # 1 - Helper Classes for
 # - Utitlity Functions
@@ -287,9 +292,19 @@ class WeakLensingDataset(Dataset):
         return map_tensor, label_tensor
 
 # %% [markdown]
-# ### CNN Model Definition
+# ### CNN Model Definition and NAS Search Space
 
 # %%
+# MobileNetV3Space is designed for ImageNet, we need to modify it for our task
+# Input: (N, 1, 1424, 176), Output: (N, 4)
+class CustomSearchSpace(MobileNetV3Space):
+    def __init__(self):
+        super().__init__()
+        # Replace the first convolutional layer to accept single-channel input
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1, bias=False)
+        # Replace the final classifier to output 4 values
+        self.classifier[-1] = nn.Linear(self.classifier[-1].in_features, 4)
+
 class KerasStyleCNN(nn.Module):
     def __init__(self, nf=16):
         super(KerasStyleCNN, self).__init__()
@@ -408,6 +423,58 @@ def gaussian_nll_loss(output, target):
     return (loss_om + loss_s8).mean()
 
 # %% [markdown]
+# ### NAS Trainer Function
+
+# %%
+def nas_trainer(model, optimizer, criterion, train_loader, val_loader, epochs, device, data_obj):
+    """
+    A simple training and evaluation function that will be called by the Evaluator.
+    """
+    # Move mask to device and add batch/channel dimensions for broadcasting
+    mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
+
+    for epoch in range(epochs):
+        # Training
+        model.train()
+        for maps, labels in train_loader:
+            maps, labels = maps.to(device), labels.to(device)
+            # Add noise on the GPU
+            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+            optimizer.zero_grad()
+            outputs = model(maps)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+        print(f"NAS Trial - Epoch {epoch+1}/{epochs}, Training Loss: {loss.item():.4f}")
+
+    # Evaluation
+    model.eval()
+    all_preds = []
+    all_labels = []
+    with torch.no_grad():
+        for maps, labels in val_loader:
+            maps, labels = maps.to(device), labels.to(device)
+            # Add noise on the GPU for validation as well
+            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+            outputs = model(maps)
+            all_preds.append(outputs.cpu().numpy())
+            all_labels.append(labels.cpu().numpy())
+
+    # Calculate final score
+    all_preds = np.concatenate(all_preds, axis=0)
+    all_labels = np.concatenate(all_labels, axis=0)
+
+    pred_mean = all_preds[:, [0, 2]]
+    pred_log_var = all_preds[:, [1, 3]]
+    pred_errorbar = np.sqrt(np.exp(pred_log_var))
+
+    final_score = Score._score_phase1(
+        true_cosmo=all_labels,
+        infer_cosmo=pred_mean,
+        errorbar=pred_errorbar
+    )
+    return final_score
+
 # ### Prediction on Test Set
 
 # %%
@@ -455,6 +522,11 @@ def predict(model, data_obj, device, batch_size):
     return mean, errorbar
 
 def main():
+    # --- Control Flag ---
+    # Set to True to run the Neural Architecture Search.
+    # Set to False to run a standard training with a defined model.
+    RUN_NAS_SEARCH = False # Or True
+
     root_dir = os.getcwd()
     print("Root directory is", root_dir)
 
@@ -648,86 +720,124 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
-    # -- Model, Optimizer --
-    model = KerasStyleCNN().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+    if RUN_NAS_SEARCH:
+        # --- Run Neural Architecture Search ---
+        print("--- Starting Neural Architecture Search ---")
 
-    # -- Training Loop --
-    best_val_score = -np.inf
-    for epoch in range(N_EPOCHS):
-        # Training
-        model.train()
-        train_loss = 0.0
-        train_iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Train]")
-        for maps, labels in train_iterator:
-            maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        # 1. Create the search space
+        model_space = CustomSearchSpace().to(device)
 
-            # Add noise on the GPU
-            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
-
-            optimizer.zero_grad()
-            outputs = model(maps)
-            loss = gaussian_nll_loss(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * maps.size(0)
-
-        train_loss /= len(train_loader.dataset)
-
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        all_val_preds = []
-        all_val_labels = []
-        with torch.no_grad():
-            val_iterator = tqdm(val_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Val]")
-            for maps, labels in val_iterator:
-                maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-
-                # Add noise on the GPU for validation as well
-                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
-
-                outputs = model(maps)
-                loss = gaussian_nll_loss(outputs, labels)
-                val_loss += loss.item() * maps.size(0)
-
-                # Store predictions and labels for scoring
-                all_val_preds.append(outputs.cpu().numpy())
-                all_val_labels.append(labels.cpu().numpy())
-
-        val_loss /= len(val_loader.dataset)
-
-        # Calculate validation score
-        all_val_preds = np.concatenate(all_val_preds, axis=0)
-        all_val_labels = np.concatenate(all_val_labels, axis=0)
-
-        pred_mean = all_val_preds[:, [0, 2]]
-        pred_log_var = all_val_preds[:, [1, 3]]
-        pred_errorbar = np.sqrt(np.exp(pred_log_var))
-
-        val_score = Score._score_phase1(
-            true_cosmo=all_val_labels,
-            infer_cosmo=pred_mean,
-            errorbar=pred_errorbar
+        # 2. Create the evaluator
+        evaluator = RetiariiEvaluator(
+            training_func=lambda model: nas_trainer(
+                model=model,
+                optimizer=optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5),
+                criterion=gaussian_nll_loss,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=5, # Each model is only trained for a few epochs during search
+                device=device,
+                data_obj=data_obj
+            )
         )
 
-        print(f"Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+        # 3. Instantiate the ProxylessNAS strategy
+        strategy = ProxylessNAS(proxy_epochs=10)
 
-        # Check if this is the best model so far
-        if val_score > best_val_score:
-            best_val_score = val_score
-            print(f"  New best model found! Score: {best_val_score:.4f}. Saving model...")
-            torch.save(model.state_dict(), 'best_model.pth')
+        # 4. Run the NAS experiment
+        # As requested, this line is commented out. Uncomment to run the search.
+        # strategy.run(model_space, evaluator)
 
+        print("\nNAS search finished (simulation).")
+        print("To run the actual search, uncomment 'strategy.run(model_space, evaluator)'")
 
-    # Load the best model for final prediction
-    print("Loading best model for prediction...")
-    model.load_state_dict(torch.load('best_model.pth'))
+        # 5. Export the best architecture found
+        print("\nExporting top models...")
+        # In a real run, you would get the model code from the strategy.
+        # for i, model_code in enumerate(strategy.export_top_models(formatter='code')):
+        #     print(f"--- Top Model {i+1} ---")
+        #     print(model_code)
 
-    # Get final predictions
-    print("Generating predictions on the test set...")
-    mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
-    print("Predictions generated.")
+        print("\n--- Example of Exported Model ---")
+        print("class TopModel(nn.Module):\n    ...")
+        print("\nTo use the best model:")
+        print("1. Save the exported model code to a file (e.g., 'exported_model.py').")
+        print("2. In this script, set RUN_NAS_SEARCH = False.")
+        print("3. Import the model: from exported_model import TopModel")
+        print("4. Change the model definition below to `model = TopModel().to(device)`")
+        print("5. Run the script again to train the new model fully.")
+
+        # Exit after search simulation
+        return
+
+    else:
+        # --- Run Standard Training and Prediction ---
+        print("--- Starting Standard Training ---")
+
+        # -- Model, Optimizer --
+        # TODO for user: Replace KerasStyleCNN with the model exported from the NAS search.
+        # e.g., from exported_model import TopModel
+        #       model = TopModel().to(device)
+        model = KerasStyleCNN().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+
+        # -- Training Loop --
+        best_val_score = -np.inf
+        for epoch in range(N_EPOCHS):
+            # Training
+            model.train()
+            train_loss = 0.0
+            train_iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Train]")
+            for maps, labels in train_iterator:
+                maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+                optimizer.zero_grad()
+                outputs = model(maps)
+                loss = gaussian_nll_loss(outputs, labels)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * maps.size(0)
+            train_loss /= len(train_loader.dataset)
+
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            all_val_preds, all_val_labels = [], []
+            with torch.no_grad():
+                val_iterator = tqdm(val_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Val]")
+                for maps, labels in val_iterator:
+                    maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                    maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+                    outputs = model(maps)
+                    loss = gaussian_nll_loss(outputs, labels)
+                    val_loss += loss.item() * maps.size(0)
+                    all_val_preds.append(outputs.cpu().numpy())
+                    all_val_labels.append(labels.cpu().numpy())
+            val_loss /= len(val_loader.dataset)
+
+            # Calculate validation score
+            all_val_preds = np.concatenate(all_val_preds, axis=0)
+            all_val_labels = np.concatenate(all_val_labels, axis=0)
+            pred_mean = all_val_preds[:, [0, 2]]
+            pred_log_var = all_val_preds[:, [1, 3]]
+            pred_errorbar = np.sqrt(np.exp(pred_log_var))
+            val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
+
+            print(f"Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+
+            if val_score > best_val_score:
+                best_val_score = val_score
+                print(f"  New best model found! Score: {best_val_score:.4f}. Saving model...")
+                torch.save(model.state_dict(), 'best_model.pth')
+
+        # Load the best model for final prediction
+        print("Loading best model for prediction...")
+        model.load_state_dict(torch.load('best_model.pth'))
+
+        # Get final predictions
+        print("Generating predictions on the test set...")
+        mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
+        print("Predictions generated.")
 
     # %% [markdown]
     # #### ⚠️ NOTE:
