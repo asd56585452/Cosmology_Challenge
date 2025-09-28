@@ -45,6 +45,7 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import shutil
+import optuna
 # %matplotlib inline
 
 # %% [markdown]
@@ -290,89 +291,94 @@ class WeakLensingDataset(Dataset):
 # ### CNN Model Definition
 
 # %%
-class KerasStyleCNN(nn.Module):
-    def __init__(self, nf=16):
-        super(KerasStyleCNN, self).__init__()
+class DynamicCNN(nn.Module):
+    def __init__(self, nf_scaling, layer_counts):
+        super(DynamicCNN, self).__init__()
+        nf = int(16 * nf_scaling)
 
-        self.features = nn.Sequential(
-            # Block 1
-            nn.Conv2d(1, nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(),
-            nn.Conv2d(nf, nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        features = nn.ModuleList()
+        in_c = 1
 
-            # Block 2
-            nn.Conv2d(nf, 2 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(2 * nf),
-            nn.ReLU(),
-            nn.Conv2d(2 * nf, 2 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(2 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        # Block 1
+        out_c = nf
+        for _ in range(layer_counts[0]):
+            features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+            ))
+            in_c = out_c
+        features.append(nn.AvgPool2d(2, 2))
 
-            # Block 3
-            nn.Conv2d(2 * nf, 4 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(4 * nf),
-            nn.ReLU(),
-            nn.Conv2d(4 * nf, 2 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(2 * nf),
-            nn.ReLU(),
-            nn.Conv2d(2 * nf, 4 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(4 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        # Block 2
+        out_c = nf * 2
+        for _ in range(layer_counts[1]):
+            features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+            ))
+            in_c = out_c
+        features.append(nn.AvgPool2d(2, 2))
 
-            # Block 4
-            nn.Conv2d(4 * nf, 8 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 4 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(4 * nf),
-            nn.ReLU(),
-            nn.Conv2d(4 * nf, 8 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        # Block 3
+        out_c_deep = nf * 4
+        out_c_bottleneck = nf * 2
+        for _ in range(layer_counts[2]):
+            features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
+                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
+                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU()
+            ))
+            in_c = out_c_deep
+        features.append(nn.AvgPool2d(2, 2))
 
-            # Block 5
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        # Block 4
+        out_c_deep = nf * 8
+        out_c_bottleneck = nf * 4
+        for _ in range(layer_counts[3]):
+            features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
+                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
+                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU()
+            ))
+            in_c = out_c_deep
+        features.append(nn.AvgPool2d(2, 2))
 
-            # Block 6
-            nn.Conv2d(16 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.ReLU() # No BN before the final activation in this block
-        )
+        # Block 5
+        out_c_deep = nf * 16
+        out_c_bottleneck = nf * 8
+        for _ in range(layer_counts[4]):
+            features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
+                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
+                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU()
+            ))
+            in_c = out_c_deep
+        features.append(nn.AvgPool2d(2, 2))
 
+        # Block 6
+        out_c_deep = nf * 16
+        out_c_bottleneck = nf * 8
+        for i in range(layer_counts[5]):
+            # The final activation in the original model is just ReLU, not Conv-BN-ReLU.
+            # This logic tries to replicate that by omitting BN on the very last layer.
+            is_last_layer = (i == layer_counts[5] - 1)
+            features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
+                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
+                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1),
+                nn.BatchNorm2d(out_c_deep) if not is_last_layer else nn.Identity(),
+                nn.ReLU()
+            ))
+            in_c = out_c_deep
+
+        self.features = nn.Sequential(*features)
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Linear(16 * nf, 4) # Output 4 values for mean and log_var
+        self.classifier = nn.Linear(in_c, 4)
 
     def forward(self, x):
         x = self.features(x)
         x = self.pool(x)
-        x = x.view(x.size(0), -1) # Flatten
+        x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
 
@@ -454,301 +460,136 @@ def predict(model, data_obj, device, batch_size):
 
     return mean, errorbar
 
-def main():
-    root_dir = os.getcwd()
-    print("Root directory is", root_dir)
-
-    # %% [markdown]
-    # **Option 1: To quickly run through this starting kit:** You may set `USE_PUBLIC_DATASET = False` so that only a downsampled training data and test data will be loaded. In the downsampled training data, there are $N_{\rm cosmo}=3$ cosmological models and $N_{\rm sys}=20$ realizations of nuisance parameters. The downsampled test data contains $N_{\rm test}=3$ instances.
-    #
-    # ***
-    #
-    # #### ⚠️ NOTE:
-    # To make a valid submission and obtain a score on Codabench, **you will need to make your predictions using the entire test data set (4,000 instances). Use the Option 2 below to load the entire test data.**
-    #
-    # ***
-    #
-    # **Option 2: To load the entire training data and test data:** Set `USE_PUBLIC_DATASET = True` and specify a path where you will save the downloaded public data from Codabench. In the entire training data, there are $N_{\rm cosmo}=101$ cosmological models and $N_{\rm sys}=256$ realizations of nuisance parameters. The entire test data contains $N_{\rm test}=4000$ instances.
-
-    # %%
-    USE_PUBLIC_DATASET = True
-
-    # USE_PUBLIC_DATASET = True
-    PUBLIC_DATA_DIR = 'public_data/'  # This is only required when you set USE_PUBLIC_DATASET = True
-
-    # %%
-    if not USE_PUBLIC_DATASET:                                         # Testing this startking kit with a tiny sample of the training data (3, 20, 1424, 176)
-        DATA_DIR = os.path.join(root_dir, 'input_data/')
-    else:                                                              # Training your model with all training data (101, 256, 1424, 176)
-        DATA_DIR = PUBLIC_DATA_DIR
-
-    # %% [markdown]
-    # ### Load the train and test data
-
-    # %%
-    # Initialize Data class object
-    data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
-
-    # Load only the mask and test data in the main process. The training data will be
-    # memory-mapped by the Dataset workers.
-    data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
-    if data_obj.USE_PUBLIC_DATASET: # The viz_label is only available for the public dataset
-        data_obj.viz_label = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.viz_label_file)
-    data_obj.load_test_data()
-
-    # %% [markdown]
-    # #### ⚠️ NOTE:
-    # - The original training images are *noiseless* (without any pixel-level noise).
-    # - The original test images is *noisy* (pixel-level noise with galaxy number density $n_g = 30~\text{arcmin}^{-2}$ and pixel size $=2$ arcmin has been added).
-    #
-    # - **You will have to add pixel-level noise to the training data through the helper function** `Utility.add_noise`.
-    #
-    # For example:
-    # ```python
-    #     noisy_kappa = Utility.add_noise(data=data_obj.kappa.astype(np.float64),
-    #                                     mask=data_obj.mask,
-    #                                     ng=data_obj.ng,
-    #                                     pixel_size=data_obj.pixelsize_arcmin)
-    # ```
-    #
-    # The shape of `noisy_kappa` will be the same as the shape of `data_obj.kappa`.
-
-    # %%
-    Ncosmo = data_obj.Ncosmo
-    Nsys = data_obj.Nsys
-
-    print(f'There are {Ncosmo} cosmological models, each has {Nsys} realizations of nuisance parameters in the training data.')
-
-    # %%
-    print(f'Shape of the mask = {data_obj.mask.shape}')
-    print(f'Shape of the test data = {data_obj.kappa_test.shape}')
-
-    # %% [markdown]
-    # #### ⚠️ NOTE:
-    #
-    # If you want to split your own training/validation sets to evaluate your model, we recommend splitting the original training data along `axis = 1` (the 256 realizations of nuisance parameters). This will ensure that there are no intrinsic correlations between the training and validation sets.
-    #
-    # For example, you may split the data by the following script:
-    # ```python
-    #     from sklearn.model_selection import train_test_split
-    #
-    #     NP_idx = np.arange(Nsys)  # The indices of Nsys nuisance parameter realizations
-    #     split_fraction = 0.2      # Set the fraction of data you want to split (between 0 and 1)
-    #     seed = 5566               # Define your random seed for reproducible results
-    #
-    #     train_NP_idx, val_NP_idx = train_test_split(NP_idx, test_size=split_fraction,
-    #                                                 random_state=seed)
-    #
-    #     kappa_train = data_obj.kappa[:, train_NP_idx]         # shape = (Ncosmo, Ntrain, 1424, 176)
-    #     label_train = data_obj.label[:, train_NP_idx]         # shape = (Ncosmo, Ntrain, 5)
-    #     kappa_val = data_obj.kappa[:, val_NP_idx]             # shape = (Ncosmo, Nval, 1424, 176)
-    #     label_val = data_obj.label[:, val_NP_idx]             # shape = (Ncosmo, Nval, 5)
-    # ```
-
-    # %% [markdown]
-    # # 3 - Visualization
-
-    # %% [markdown]
-    # ### 2D training maps
-
-    # %% [markdown]
-    # survey mask: a binary map that shows which parts of the sky are observed (yellow) and which areas are blocked (purple)
-
-    # %%
-    # mask
-    # Visualization.plot_mask(mask=data_obj.mask)
-
-    # %% [markdown]
-    # noiseless training convergence map: The convergence maps show the projected matter density (including dark matter and ordinary matter) in the simulated universe, under the Born approximation. On large scales, we can see the matter forms web-like structures (cosmic web) in the universe. The dense regions in these maps, called dark matter halos, are the sites where galaxies form and reside.
-
-    # %%
-    # # noiseless training convergence map
-    # Visualization.plot_noiseless_training_convergence_map(kappa=data_obj.kappa)
-
-    # %% [markdown]
-    # noisy training convergence map: We add Gaussian noise to the data. This mimics the observed data. During training the noise can be added on the fly with different realizations.
-
-    # %%
-    # noisy training convergence map
-    # Visualization.plot_noisy_training_convergence_map(kappa=data_obj.kappa,
-    #                                                   mask=data_obj.mask,
-    #                                                   pixelsize_arcmin=data_obj.pixelsize_arcmin,
-    #                                                   ng=data_obj.ng)
-
-    # %% [markdown]
-    # ### Distribution of physical parameters
-
-    # %% [markdown]
-    # Distribution of cosmological parameters $\Omega_m$ and $S_8$. The density increases towards fiducial cosmology. Note that this distribution introduces a prior in the analysis. The test data cosmology follows the same distribution as the training data.
-
-    # %%
-    # Visualization.plot_cosmological_parameters_OmegaM_S8(label=data_obj.viz_label)
-
-    # %% [markdown]
-    # Distribution of baryonic physics parameters. These are nuisance parameters and should be marginalized in the analysis. They follow a uniform distribution within the prior range $T_{\mathrm{AGN}} \in [7.2, 8.5]$, $f_0 \in [0, 0.0265]$
-
-    # %%
-    # Visualization.plot_baryonic_physics_parameters(label=data_obj.viz_label)
-
-    # %% [markdown]
-    # Distribution of photometric redshift uncertainty parameters. This is a nuisance parameter and should be marginalized in the analysis. It follows a Gaussian distribution with mean 0 and std 0.022
-
-    # %%
-    # Visualization.plot_photometric_redshift_uncertainty_parameters(label=data_obj.viz_label)
-
-    # %% [markdown]
-    # # 5 - Phase one inference
-    # We will now train the CNN emulator.
-
-    # %%
-    # -- Hyperparameters --
-    N_EPOCHS = 30 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 8 # Reduced batch size to prevent OOM error
-    LEARNING_RATE = 1e-5
-    VAL_SPLIT = 0.2
-    RANDOM_SEED = 42
-
-    # -- Device Setup --
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # Move mask to device and add batch/channel dimensions for broadcasting
-    mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
-
-    # -- Data Splitting --
-    # We split the data based on the nuisance parameter realizations (Nsys axis)
-    Nsys = data_obj.Nsys
-    indices = np.arange(Nsys)
-    train_indices, val_indices = train_test_split(indices, test_size=VAL_SPLIT, random_state=RANDOM_SEED)
-
-    # Define paths to the full, original data files
-    kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
-    label_path = os.path.join(DATA_DIR, data_obj.label_file)
+def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, n_epochs):
+    # -- Hyperparameters to Tune --
+    lr = trial.suggest_float("lr", 1e-5, 1e-4, log=True)
+    batch_size = trial.suggest_categorical("batch_size", [4, 8])
+    nf_scaling = trial.suggest_float("nf_scaling", 0.5, 1.5)
+    layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 2) for i in range(6)]
 
     # -- Create Datasets and DataLoaders --
     train_dataset = WeakLensingDataset(
-        kappa_path=kappa_path,
-        label_path=label_path,
-        sys_indices=train_indices,
-        data_obj=data_obj,
-        train=True
+        kappa_path=kappa_path, label_path=label_path,
+        sys_indices=train_indices, data_obj=data_obj, train=True
     )
-
     val_dataset = WeakLensingDataset(
-        kappa_path=kappa_path,
-        label_path=label_path,
-        sys_indices=val_indices,
-        data_obj=data_obj,
-        train=True # Add noise to validation as well to get a score estimate
+        kappa_path=kappa_path, label_path=label_path,
+        sys_indices=val_indices, data_obj=data_obj, train=True
     )
-
-    # With memory-mapping, we can use multiple workers on all platforms
-    num_workers = 2
-
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     # -- Model, Optimizer --
-    model = KerasStyleCNN().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
+    model = DynamicCNN(nf_scaling=nf_scaling, layer_counts=layer_counts).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # -- Training Loop --
-    best_val_score = -np.inf
-    for epoch in range(N_EPOCHS):
-        # Training
+    for epoch in range(n_epochs):
         model.train()
         train_loss = 0.0
-        train_iterator = tqdm(train_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Train]")
+        train_iterator = tqdm(train_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Train]")
         for maps, labels in train_iterator:
             maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-
-            # Add noise on the GPU
             maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
-
             optimizer.zero_grad()
             outputs = model(maps)
             loss = gaussian_nll_loss(outputs, labels)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * maps.size(0)
-
         train_loss /= len(train_loader.dataset)
 
         # Validation
         model.eval()
         val_loss = 0.0
-        all_val_preds = []
-        all_val_labels = []
+        all_val_preds, all_val_labels = [], []
+        val_iterator = tqdm(val_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Val]")
         with torch.no_grad():
-            val_iterator = tqdm(val_loader, desc=f"Epoch {epoch+1}/{N_EPOCHS} [Val]")
             for maps, labels in val_iterator:
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-
-                # Add noise on the GPU for validation as well
                 maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
-
                 outputs = model(maps)
                 loss = gaussian_nll_loss(outputs, labels)
                 val_loss += loss.item() * maps.size(0)
-
-                # Store predictions and labels for scoring
                 all_val_preds.append(outputs.cpu().numpy())
                 all_val_labels.append(labels.cpu().numpy())
-
         val_loss /= len(val_loader.dataset)
 
-        # Calculate validation score
         all_val_preds = np.concatenate(all_val_preds, axis=0)
         all_val_labels = np.concatenate(all_val_labels, axis=0)
-
         pred_mean = all_val_preds[:, [0, 2]]
         pred_log_var = all_val_preds[:, [1, 3]]
         pred_errorbar = np.sqrt(np.exp(pred_log_var))
+        val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
 
-        val_score = Score._score_phase1(
-            true_cosmo=all_val_labels,
-            infer_cosmo=pred_mean,
-            errorbar=pred_errorbar
-        )
+        print(f"Trial {trial.number} Epoch {epoch+1}/{n_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
 
-        print(f"Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+        trial.report(val_score, epoch)
+        if trial.should_prune():
+            raise optuna.exceptions.TrialPruned()
 
-        # Check if this is the best model so far
-        if val_score > best_val_score:
-            best_val_score = val_score
-            print(f"  New best model found! Score: {best_val_score:.4f}. Saving model...")
-            torch.save(model.state_dict(), 'best_model.pth')
+    return val_score
 
+def main():
+    root_dir = os.getcwd()
+    print("Root directory is", root_dir)
+    USE_PUBLIC_DATASET = False
+    PUBLIC_DATA_DIR = 'public_data/'
+    DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
+    N_EPOCHS = 3
+    N_TRIALS = 2
+    TIMEOUT = 400
 
-    # Load the best model for final prediction
+    data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
+    data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
+    if not USE_PUBLIC_DATASET: # viz_label is only available for the public dataset
+        pass
+    else:
+        data_obj.viz_label = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.viz_label_file)
+    data_obj.load_test_data()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
+
+    Nsys = data_obj.Nsys
+    indices = np.arange(Nsys)
+    train_indices, val_indices = train_test_split(indices, test_size=0.2, random_state=42)
+    kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
+    label_path = os.path.join(DATA_DIR, data_obj.label_file)
+
+    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+    study.optimize(lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, N_EPOCHS), n_trials=N_TRIALS, timeout=TIMEOUT)
+
+    print("Best trial:", study.best_trial.params)
+
+    # Train final model with best params
+    best_params = study.best_trial.params
+    model = DynamicCNN(nf_scaling=best_params['nf_scaling'], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
+
+    train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=np.arange(Nsys), data_obj=data_obj, train=True)
+    train_loader = DataLoader(train_dataset, batch_size=best_params['batch_size'], shuffle=True, num_workers=0, pin_memory=False)
+
+    for epoch in range(N_EPOCHS):
+        model.train()
+        for maps, labels in tqdm(train_loader, desc=f"Final Training Epoch {epoch+1}/{N_EPOCHS}"):
+            maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+            optimizer.zero_grad()
+            outputs = model(maps)
+            loss = gaussian_nll_loss(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+    torch.save(model.state_dict(), 'best_model.pth')
     print("Loading best model for prediction...")
     model.load_state_dict(torch.load('best_model.pth'))
 
-    # Get final predictions
     print("Generating predictions on the test set...")
-    mean, errorbar = predict(model, data_obj, device, BATCH_SIZE)
+    mean, errorbar = predict(model, data_obj, device, best_params['batch_size'])
     print("Predictions generated.")
 
-    # %% [markdown]
-    # #### ⚠️ NOTE:
-    # - `mean`: a 2D array containing the point estimates of 2 cosmological parameters $\hat{\Omega}_m$ and $\hat{S}_8$.
-    # - `errorbar`: a 2D array containing the one-standard deviation uncertainties of 2 cosmological parameters $\hat{\sigma}_{\Omega_m}$ and  $\hat{\sigma}_{S_8}$.
-    #
-    # The shapes of `mean`, and `errorbar` must be $(N_{\rm test}, 2)$.
-    #
-    # ***
-
-    # %% [markdown]
-    # # 6 - (Optional) Prepare submission for Codabench
-
-    # %% [markdown]
-    # ***
-    #
-    # This section will save the model predictions `mean` and `errorbar` (both are 2D arrays with shape `(4000, 2)`, where `4000` is the number of test instances and `2` is the number of our parameters of interest) as a dictionary in a JSON file `result.json`. Then it will compress `result.json` into a zip file that can be directly submitted to Codabench.
-    #
-    # ***
-
-    # %%
     data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
     the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
     zip_file_name = 'Submission_' + the_date + '.zip'
