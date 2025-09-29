@@ -292,84 +292,54 @@ class WeakLensingDataset(Dataset):
 
 # %%
 class DynamicCNN(nn.Module):
-    def __init__(self, nf_scaling, layer_counts):
+    def __init__(self, nf_scalings, layer_counts):
         super(DynamicCNN, self).__init__()
-        nf = int(16 * nf_scaling)
+        nf = 16
 
         features = nn.ModuleList()
         in_c = 1
 
-        # Block 1
-        out_c = nf
-        for _ in range(layer_counts[0]):
-            features.append(nn.Sequential(
+        for i in range(len(layer_counts)):
+            out_c = int(nf * (2 ** i) * nf_scalings[i])
+            if layer_counts[i] == 1:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+                ))
+                in_c = out_c
+            elif layer_counts[i] == 2:
+                features.append(nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
-            ))
-            in_c = out_c
-        features.append(nn.AvgPool2d(2, 2))
-
-        # Block 2
-        out_c = nf * 2
-        for _ in range(layer_counts[1]):
-            features.append(nn.Sequential(
+                nn.Conv2d(out_c, out_c//2, 1, padding=1), nn.BatchNorm2d(out_c//2), nn.ReLU()
+                ))   
+                in_c = out_c//2
+            elif layer_counts[i] == 3:
+                features.append(nn.Sequential(
                 nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
-            ))
-            in_c = out_c
-        features.append(nn.AvgPool2d(2, 2))
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+                ))
+                in_c = out_c
+            elif layer_counts[i] == 4:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU()
+                ))
+                in_c = out_c//2
+            elif layer_counts[i] == 5:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+                ))
+                in_c = out_c
+            
+            if i < len(layer_counts) - 1:
+                features.append(nn.AvgPool2d(2, 2))
 
-        # Block 3
-        out_c_deep = nf * 4
-        out_c_bottleneck = nf * 2
-        for _ in range(layer_counts[2]):
-            features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
-                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
-                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU()
-            ))
-            in_c = out_c_deep
-        features.append(nn.AvgPool2d(2, 2))
-
-        # Block 4
-        out_c_deep = nf * 8
-        out_c_bottleneck = nf * 4
-        for _ in range(layer_counts[3]):
-            features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
-                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
-                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU()
-            ))
-            in_c = out_c_deep
-        features.append(nn.AvgPool2d(2, 2))
-
-        # Block 5
-        out_c_deep = nf * 16
-        out_c_bottleneck = nf * 8
-        for _ in range(layer_counts[4]):
-            features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
-                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
-                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU()
-            ))
-            in_c = out_c_deep
-        features.append(nn.AvgPool2d(2, 2))
-
-        # Block 6
-        out_c_deep = nf * 16
-        out_c_bottleneck = nf * 8
-        for i in range(layer_counts[5]):
-            # The final activation in the original model is just ReLU, not Conv-BN-ReLU.
-            # This logic tries to replicate that by omitting BN on the very last layer.
-            is_last_layer = (i == layer_counts[5] - 1)
-            features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c_deep, 3, padding=1), nn.BatchNorm2d(out_c_deep), nn.ReLU(),
-                nn.Conv2d(out_c_deep, out_c_bottleneck, 1, padding=0), nn.BatchNorm2d(out_c_bottleneck), nn.ReLU(),
-                nn.Conv2d(out_c_bottleneck, out_c_deep, 3, padding=1),
-                nn.BatchNorm2d(out_c_deep) if not is_last_layer else nn.Identity(),
-                nn.ReLU()
-            ))
-            in_c = out_c_deep
 
         self.features = nn.Sequential(*features)
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -462,10 +432,10 @@ def predict(model, data_obj, device, batch_size):
 
 def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, n_epochs):
     # -- Hyperparameters to Tune --
-    lr = trial.suggest_float("lr", 1e-5, 1e-4, log=True)
-    batch_size = trial.suggest_categorical("batch_size", [4, 8])
-    nf_scaling = trial.suggest_float("nf_scaling", 0.5, 1.5)
-    layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 2) for i in range(6)]
+    lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+    batch_size = trial.suggest_int("batch_size", 4 ,32 , log=True)
+    nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
+    layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 5) for i in range(6)]
 
     # -- Create Datasets and DataLoaders --
     train_dataset = WeakLensingDataset(
@@ -480,7 +450,7 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, 
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     # -- Model, Optimizer --
-    model = DynamicCNN(nf_scaling=nf_scaling, layer_counts=layer_counts).to(device)
+    model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
     # -- Training Loop --
@@ -533,12 +503,13 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, 
 def main():
     root_dir = os.getcwd()
     print("Root directory is", root_dir)
-    USE_PUBLIC_DATASET = False
+    USE_PUBLIC_DATASET = True
     PUBLIC_DATA_DIR = 'public_data/'
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
-    N_EPOCHS = 3
+    N_EPOCHS = 1
     N_TRIALS = 2
-    TIMEOUT = 400
+    N_JOBS = 2
+    TIMEOUT = 600  # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
@@ -559,13 +530,13 @@ def main():
     label_path = os.path.join(DATA_DIR, data_obj.label_file)
 
     study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
-    study.optimize(lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, N_EPOCHS), n_trials=N_TRIALS, timeout=TIMEOUT)
+    study.optimize(lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, N_EPOCHS),n_jobs=N_JOBS, n_trials=N_TRIALS, timeout=TIMEOUT)
 
     print("Best trial:", study.best_trial.params)
 
     # Train final model with best params
     best_params = study.best_trial.params
-    model = DynamicCNN(nf_scaling=best_params['nf_scaling'], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
+    model = DynamicCNN(nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
     optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
 
     train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=np.arange(Nsys), data_obj=data_obj, train=True)
