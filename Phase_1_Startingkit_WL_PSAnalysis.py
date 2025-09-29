@@ -453,6 +453,8 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, 
     model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
+    best_val_score = -np.inf  # Initialize with a very low value
+
     # -- Training Loop --
     for epoch in range(n_epochs):
         model.train()
@@ -492,13 +494,16 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, 
         pred_errorbar = np.sqrt(np.exp(pred_log_var))
         val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
 
-        print(f"Trial {trial.number} Epoch {epoch+1}/{n_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+        if val_score > best_val_score:
+            best_val_score = val_score
+
+        print(f"Trial {trial.number} Epoch {epoch+1}/{n_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}, Best Val Score: {best_val_score:.4f}")
 
         trial.report(val_score, epoch)
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
 
-    return val_score
+    return best_val_score
 
 def main():
     root_dir = os.getcwd()
@@ -506,7 +511,7 @@ def main():
     USE_PUBLIC_DATASET = True
     PUBLIC_DATA_DIR = 'public_data/'
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
-    N_EPOCHS = 1
+    N_EPOCHS = 10
     N_TRIALS = 2
     N_JOBS = 2
     TIMEOUT = 600  # 1 hour
@@ -529,22 +534,42 @@ def main():
     kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
     label_path = os.path.join(DATA_DIR, data_obj.label_file)
 
-    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner())
+    study = optuna.create_study(
+        study_name="weak_lensing_phase1",
+        storage="sqlite:///optuna_study.db",
+        load_if_exists=True,
+        direction="maximize",
+        pruner=optuna.pruners.MedianPruner()
+    )
     study.optimize(lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, N_EPOCHS),n_jobs=N_JOBS, n_trials=N_TRIALS, timeout=TIMEOUT)
 
     print("Best trial:", study.best_trial.params)
 
-    # Train final model with best params
+    # Save the best hyperparameters
     best_params = study.best_trial.params
+    with open("best_hyperparameters.json", "w") as f:
+        json.dump(best_params, f, indent=4)
+    print("Best hyperparameters saved to best_hyperparameters.json")
+
+    # Train final model with best params
     model = DynamicCNN(nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
     optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
 
-    train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=np.arange(Nsys), data_obj=data_obj, train=True)
-    train_loader = DataLoader(train_dataset, batch_size=best_params['batch_size'], shuffle=True, num_workers=0, pin_memory=False)
+    # Create a new train/val split for the final training
+    final_train_indices, final_val_indices = train_test_split(indices, test_size=0.2, random_state=42)
+    final_train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=final_train_indices, data_obj=data_obj, train=True)
+    final_val_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=final_val_indices, data_obj=data_obj, train=True)
+    final_train_loader = DataLoader(final_train_dataset, batch_size=best_params['batch_size'], shuffle=True, num_workers=0, pin_memory=False)
+    final_val_loader = DataLoader(final_val_dataset, batch_size=best_params['batch_size'], shuffle=False, num_workers=0, pin_memory=False)
+
+    best_val_score = -np.inf
+    best_model_state = None
 
     for epoch in range(N_EPOCHS):
         model.train()
-        for maps, labels in tqdm(train_loader, desc=f"Final Training Epoch {epoch+1}/{N_EPOCHS}"):
+        train_loss = 0.0
+        train_iterator = tqdm(final_train_loader, desc=f"Final Training Epoch {epoch+1}/{N_EPOCHS}")
+        for maps, labels in train_iterator:
             maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
             maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
             optimizer.zero_grad()
@@ -552,8 +577,40 @@ def main():
             loss = gaussian_nll_loss(outputs, labels)
             loss.backward()
             optimizer.step()
+            train_loss += loss.item() * maps.size(0)
+        train_loss /= len(final_train_loader.dataset)
 
-    torch.save(model.state_dict(), 'best_model.pth')
+        # Validation for final model
+        model.eval()
+        val_loss = 0.0
+        all_val_preds, all_val_labels = [], []
+        with torch.no_grad():
+            for maps, labels in final_val_loader:
+                maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+                outputs = model(maps)
+                loss = gaussian_nll_loss(outputs, labels)
+                val_loss += loss.item() * maps.size(0)
+                all_val_preds.append(outputs.cpu().numpy())
+                all_val_labels.append(labels.cpu().numpy())
+        val_loss /= len(final_val_loader.dataset)
+
+        all_val_preds = np.concatenate(all_val_preds, axis=0)
+        all_val_labels = np.concatenate(all_val_labels, axis=0)
+        pred_mean = all_val_preds[:, [0, 2]]
+        pred_log_var = all_val_preds[:, [1, 3]]
+        pred_errorbar = np.sqrt(np.exp(pred_log_var))
+        val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
+
+        print(f"Final Training Epoch {epoch+1}/{N_EPOCHS}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}")
+
+        if val_score > best_val_score:
+            best_val_score = val_score
+            best_model_state = model.state_dict()
+            torch.save(best_model_state, 'best_model.pth')
+            print(f"New best model saved with score: {best_val_score:.4f}")
+
+
     print("Loading best model for prediction...")
     model.load_state_dict(torch.load('best_model.pth'))
 
