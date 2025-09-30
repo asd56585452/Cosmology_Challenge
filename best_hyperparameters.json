@@ -1,0 +1,16 @@
+{
+    "lr": 0.00018350949936063536,
+    "batch_size": 4,
+    "block_0_nf_scaling": 1.3454603401266192,
+    "block_1_nf_scaling": 1.3419646091122988,
+    "block_2_nf_scaling": 2.851456562745462,
+    "block_3_nf_scaling": 1.8826012686258102,
+    "block_4_nf_scaling": 1.1968921606053016,
+    "block_5_nf_scaling": 0.9559066969152781,
+    "block_0_layers": 2,
+    "block_1_layers": 5,
+    "block_2_layers": 1,
+    "block_3_layers": 3,
+    "block_4_layers": 5,
+    "block_5_layers": 4
+}

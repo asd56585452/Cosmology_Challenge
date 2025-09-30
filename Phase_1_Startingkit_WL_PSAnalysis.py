@@ -37,6 +37,7 @@ import json
 import time
 import zipfile
 import datetime
+import random
 import numpy as np
 import torch
 import torch.nn as nn
@@ -61,6 +62,20 @@ from optuna.integration import TensorBoardCallback
 
 # %%
 class Utility:
+    @staticmethod
+    def set_seed(seed):
+        """
+        Set the seed for all random number generators to ensure reproducibility.
+        """
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)  # if you are using multi-GPU.
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
     @staticmethod
     def add_noise(data, mask, ng, pixel_size=2.):
         """
@@ -504,6 +519,7 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
     return best_val_score
 
 def main():
+    Utility.set_seed(42)
     root_dir = os.getcwd()
     print("Root directory is", root_dir)
     USE_PUBLIC_DATASET = True
