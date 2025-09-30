@@ -46,6 +46,7 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import shutil
 import optuna
+from optuna.integration import TensorBoardCallback
 # %matplotlib inline
 
 # %% [markdown]
@@ -430,10 +431,10 @@ def predict(model, data_obj, device, batch_size):
 
     return mean, errorbar
 
-def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, n_epochs):
+def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dataset, kappa_path, label_path, n_epochs):
     # -- Hyperparameters to Tune --
     lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_int("batch_size", 4 ,32 , log=True)
+    batch_size = trial.suggest_int("batch_size", 4, 32, log=True)
     nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
     layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 5) for i in range(6)]
 
@@ -442,12 +443,9 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, 
         kappa_path=kappa_path, label_path=label_path,
         sys_indices=train_indices, data_obj=data_obj, train=True
     )
-    val_dataset = WeakLensingDataset(
-        kappa_path=kappa_path, label_path=label_path,
-        sys_indices=val_indices, data_obj=data_obj, train=True
-    )
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+    # Use the pre-generated noisy validation set
+    val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
     # -- Model, Optimizer --
     model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
@@ -478,8 +476,8 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, 
         val_iterator = tqdm(val_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Val]")
         with torch.no_grad():
             for maps, labels in val_iterator:
+                # Maps from the val_loader are already noisy
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
                 outputs = model(maps)
                 loss = gaussian_nll_loss(outputs, labels)
                 val_loss += loss.item() * maps.size(0)
@@ -534,6 +532,29 @@ def main():
     kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
     label_path = os.path.join(DATA_DIR, data_obj.label_file)
 
+    # Create a fixed, noisy validation set to ensure stable val_loss
+    print("Generating a fixed noisy validation set...")
+    val_dataset_for_noise = WeakLensingDataset(
+        kappa_path=kappa_path, label_path=label_path,
+        sys_indices=val_indices, data_obj=data_obj, train=True
+    )
+    # Use a generic batch size for this one-time operation
+    val_loader_for_noise = DataLoader(val_dataset_for_noise, batch_size=32, shuffle=False, num_workers=0, pin_memory=False)
+
+    noisy_val_maps_list = []
+    val_labels_list = []
+    with torch.no_grad():
+        for maps, labels in tqdm(val_loader_for_noise, desc="Pre-noising validation data"):
+            maps = maps.to(device)
+            noisy_maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+            noisy_val_maps_list.append(noisy_maps.cpu())
+            val_labels_list.append(labels.cpu())
+
+    noisy_val_maps_tensor = torch.cat(noisy_val_maps_list)
+    val_labels_tensor = torch.cat(val_labels_list)
+    fixed_val_dataset = torch.utils.data.TensorDataset(noisy_val_maps_tensor, val_labels_tensor)
+    print("Fixed noisy validation set generated.")
+
     study = optuna.create_study(
         study_name="weak_lensing_phase1",
         storage="sqlite:///optuna_study.db",
@@ -541,7 +562,15 @@ def main():
         direction="maximize",
         pruner=optuna.pruners.MedianPruner()
     )
-    study.optimize(lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, val_indices, kappa_path, label_path, N_EPOCHS),n_jobs=N_JOBS, n_trials=N_TRIALS, timeout=TIMEOUT)
+    # Pass the fixed dataset to the objective function
+    tensorboard_callback = TensorBoardCallback("logs/", metric_name="val_score")
+    study.optimize(
+        lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dataset, kappa_path, label_path, N_EPOCHS),
+        n_jobs=N_JOBS,
+        n_trials=N_TRIALS,
+        timeout=TIMEOUT,
+        callbacks=[tensorboard_callback],
+    )
 
     print("Best trial:", study.best_trial.params)
 
@@ -555,12 +584,11 @@ def main():
     model = DynamicCNN(nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
     optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
 
-    # Create a new train/val split for the final training
-    final_train_indices, final_val_indices = train_test_split(indices, test_size=0.2, random_state=42)
-    final_train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=final_train_indices, data_obj=data_obj, train=True)
-    final_val_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=final_val_indices, data_obj=data_obj, train=True)
+    # For the final training, we use the same training split as Optuna
+    final_train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=train_indices, data_obj=data_obj, train=True)
     final_train_loader = DataLoader(final_train_dataset, batch_size=best_params['batch_size'], shuffle=True, num_workers=0, pin_memory=False)
-    final_val_loader = DataLoader(final_val_dataset, batch_size=best_params['batch_size'], shuffle=False, num_workers=0, pin_memory=False)
+    # Use the same fixed noisy validation set for the final training
+    final_val_loader = DataLoader(fixed_val_dataset, batch_size=best_params['batch_size'], shuffle=False, num_workers=0, pin_memory=False)
 
     best_val_score = -np.inf
     best_model_state = None
@@ -587,7 +615,7 @@ def main():
         with torch.no_grad():
             for maps, labels in final_val_loader:
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+                # No noise addition needed, as the validation set is pre-noised
                 outputs = model(maps)
                 loss = gaussian_nll_loss(outputs, labels)
                 val_loss += loss.item() * maps.size(0)
