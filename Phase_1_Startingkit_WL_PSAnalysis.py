@@ -47,7 +47,7 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 import shutil
 import optuna
-from optuna.integration import TensorBoardCallback
+# from optuna.integration import TensorBoardCallback
 # %matplotlib inline
 
 # %% [markdown]
@@ -447,6 +447,7 @@ def predict(model, data_obj, device, batch_size):
     return mean, errorbar
 
 def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dataset, kappa_path, label_path, n_epochs):
+    Utility.set_seed(42)
     # -- Hyperparameters to Tune --
     lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
     batch_size = trial.suggest_int("batch_size", 4, 32, log=True)
@@ -526,9 +527,9 @@ def main():
     PUBLIC_DATA_DIR = 'public_data/'
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_EPOCHS = 10
-    N_TRIALS = 2
+    N_TRIALS = 1000
     N_JOBS = 2
-    TIMEOUT = 600  # 1 hour
+    TIMEOUT = 3600 * 20  # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
@@ -579,13 +580,12 @@ def main():
         pruner=optuna.pruners.MedianPruner()
     )
     # Pass the fixed dataset to the objective function
-    tensorboard_callback = TensorBoardCallback("logs/", metric_name="val_score")
+    # tensorboard_callback = TensorBoardCallback("logs/", metric_name="val_score")
     study.optimize(
         lambda trial: objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dataset, kappa_path, label_path, N_EPOCHS),
         n_jobs=N_JOBS,
         n_trials=N_TRIALS,
         timeout=TIMEOUT,
-        callbacks=[tensorboard_callback],
     )
 
     print("Best trial:", study.best_trial.params)
@@ -595,6 +595,7 @@ def main():
     with open("best_hyperparameters.json", "w") as f:
         json.dump(best_params, f, indent=4)
     print("Best hyperparameters saved to best_hyperparameters.json")
+    Utility.set_seed(42)
 
     # Train final model with best params
     model = DynamicCNN(nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
