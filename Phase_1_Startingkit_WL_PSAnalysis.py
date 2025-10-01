@@ -447,77 +447,91 @@ def predict(model, data_obj, device, batch_size):
     return mean, errorbar
 
 def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dataset, kappa_path, label_path, n_epochs):
-    Utility.set_seed(42)
-    # -- Hyperparameters to Tune --
-    lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-    batch_size = trial.suggest_int("batch_size", 4, 32, log=True)
-    nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
-    layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 5) for i in range(6)]
+    try:
+        Utility.set_seed(42)
+        # -- Hyperparameters to Tune --
+        lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+        batch_size = trial.suggest_int("batch_size", 4, 32, log=True)
+        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
+        layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 5) for i in range(6)]
 
-    # -- Create Datasets and DataLoaders --
-    train_dataset = WeakLensingDataset(
-        kappa_path=kappa_path, label_path=label_path,
-        sys_indices=train_indices, data_obj=data_obj, train=True
-    )
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False)
-    # Use the pre-generated noisy validation set
-    val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+        # -- Create Datasets and DataLoaders --
+        train_dataset = WeakLensingDataset(
+            kappa_path=kappa_path, label_path=label_path,
+            sys_indices=train_indices, data_obj=data_obj, train=True
+        )
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False)
+        # Use the pre-generated noisy validation set
+        val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
 
-    # -- Model, Optimizer --
-    model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+        # -- Model, Optimizer --
+        model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    best_val_score = -np.inf  # Initialize with a very low value
+        best_val_score = -np.inf  # Initialize with a very low value
 
-    # -- Training Loop --
-    for epoch in range(n_epochs):
-        model.train()
-        train_loss = 0.0
-        train_iterator = tqdm(train_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Train]")
-        for maps, labels in train_iterator:
-            maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-            maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
-            optimizer.zero_grad()
-            outputs = model(maps)
-            loss = gaussian_nll_loss(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item() * maps.size(0)
-        train_loss /= len(train_loader.dataset)
-
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        all_val_preds, all_val_labels = [], []
-        val_iterator = tqdm(val_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Val]")
-        with torch.no_grad():
-            for maps, labels in val_iterator:
-                # Maps from the val_loader are already noisy
+        # -- Training Loop --
+        for epoch in range(n_epochs):
+            model.train()
+            train_loss = 0.0
+            train_iterator = tqdm(train_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Train]")
+            for maps, labels in train_iterator:
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
+                optimizer.zero_grad()
                 outputs = model(maps)
                 loss = gaussian_nll_loss(outputs, labels)
-                val_loss += loss.item() * maps.size(0)
-                all_val_preds.append(outputs.cpu().numpy())
-                all_val_labels.append(labels.cpu().numpy())
-        val_loss /= len(val_loader.dataset)
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item() * maps.size(0)
+            train_loss /= len(train_loader.dataset)
 
-        all_val_preds = np.concatenate(all_val_preds, axis=0)
-        all_val_labels = np.concatenate(all_val_labels, axis=0)
-        pred_mean = all_val_preds[:, [0, 2]]
-        pred_log_var = all_val_preds[:, [1, 3]]
-        pred_errorbar = np.sqrt(np.exp(pred_log_var))
-        val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
+            # Validation
+            model.eval()
+            val_loss = 0.0
+            all_val_preds, all_val_labels = [], []
+            val_iterator = tqdm(val_loader, desc=f"Trial {trial.number} Epoch {epoch+1}/{n_epochs} [Val]")
+            with torch.no_grad():
+                for maps, labels in val_iterator:
+                    # Maps from the val_loader are already noisy
+                    maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                    outputs = model(maps)
+                    loss = gaussian_nll_loss(outputs, labels)
+                    val_loss += loss.item() * maps.size(0)
+                    all_val_preds.append(outputs.cpu().numpy())
+                    all_val_labels.append(labels.cpu().numpy())
+            val_loss /= len(val_loader.dataset)
 
-        if val_score > best_val_score:
-            best_val_score = val_score
+            all_val_preds = np.concatenate(all_val_preds, axis=0)
+            all_val_labels = np.concatenate(all_val_labels, axis=0)
+            pred_mean = all_val_preds[:, [0, 2]]
+            pred_log_var = all_val_preds[:, [1, 3]]
+            pred_errorbar = np.sqrt(np.exp(pred_log_var))
+            val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
 
-        print(f"Trial {trial.number} Epoch {epoch+1}/{n_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}, Best Val Score: {best_val_score:.4f}")
+            if val_score > best_val_score:
+                best_val_score = val_score
 
-        trial.report(val_score, epoch)
-        if trial.should_prune():
+            print(f"Trial {trial.number} Epoch {epoch+1}/{n_epochs}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val Score: {val_score:.4f}, Best Val Score: {best_val_score:.4f}")
+
+            trial.report(val_score, epoch)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+
+        return best_val_score
+    except RuntimeError as e:
+        if "CUDA out of memory" in str(e):
+            print(f"Trial {trial.number} failed with CUDA OOM error. Pruning.")
+            # It's a good practice to clean up memory before pruning
+            del model
+            del optimizer
+            del train_loader
+            del val_loader
+            torch.cuda.empty_cache()
             raise optuna.exceptions.TrialPruned()
-
-    return best_val_score
+        else:
+            # Re-raise other runtime errors
+            raise e
 
 def main():
     Utility.set_seed(42)
