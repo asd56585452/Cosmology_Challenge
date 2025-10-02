@@ -460,9 +460,9 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
             kappa_path=kappa_path, label_path=label_path,
             sys_indices=train_indices, data_obj=data_obj, train=True
         )
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
         # Use the pre-generated noisy validation set
-        val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+        val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
         # -- Model, Optimizer --
         model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
@@ -542,7 +542,7 @@ def main():
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_EPOCHS = 10
     N_TRIALS = 1000
-    N_JOBS = 2
+    N_JOBS = 1
     TIMEOUT = 3600 * 20  # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
