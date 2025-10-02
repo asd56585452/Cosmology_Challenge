@@ -290,89 +290,64 @@ class WeakLensingDataset(Dataset):
 # ### CNN Model Definition
 
 # %%
-class KerasStyleCNN(nn.Module):
-    def __init__(self, nf=16):
-        super(KerasStyleCNN, self).__init__()
+class DynamicCNN(nn.Module):
+    def __init__(self, nf_scalings, layer_counts):
+        super(DynamicCNN, self).__init__()
+        nf = 16
 
-        self.features = nn.Sequential(
-            # Block 1
-            nn.Conv2d(1, nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(),
-            nn.Conv2d(nf, nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        features = nn.ModuleList()
+        in_c = 1
 
-            # Block 2
-            nn.Conv2d(nf, 2 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(2 * nf),
-            nn.ReLU(),
-            nn.Conv2d(2 * nf, 2 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(2 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+        for i in range(len(layer_counts)):
+            out_c = int(nf * (2 ** i) * nf_scalings[i])
+            if layer_counts[i] == 1:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+                ))
+                in_c = out_c
+            elif layer_counts[i] == 2:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=1), nn.BatchNorm2d(out_c//2), nn.ReLU()
+                ))
+                in_c = out_c//2
+            elif layer_counts[i] == 3:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+                ))
+                in_c = out_c
+            elif layer_counts[i] == 4:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU()
+                ))
+                in_c = out_c//2
+            elif layer_counts[i] == 5:
+                features.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
+                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
+                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
+                ))
+                in_c = out_c
 
-            # Block 3
-            nn.Conv2d(2 * nf, 4 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(4 * nf),
-            nn.ReLU(),
-            nn.Conv2d(4 * nf, 2 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(2 * nf),
-            nn.ReLU(),
-            nn.Conv2d(2 * nf, 4 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(4 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
+            if i < len(layer_counts) - 1:
+                features.append(nn.AvgPool2d(2, 2))
 
-            # Block 4
-            nn.Conv2d(4 * nf, 8 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 4 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(4 * nf),
-            nn.ReLU(),
-            nn.Conv2d(4 * nf, 8 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
 
-            # Block 5
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.AvgPool2d(kernel_size=2, stride=2),
-
-            # Block 6
-            nn.Conv2d(16 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16 * nf),
-            nn.ReLU(),
-            nn.Conv2d(16 * nf, 8 * nf, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8 * nf),
-            nn.ReLU(),
-            nn.Conv2d(8 * nf, 16 * nf, kernel_size=3, padding=1),
-            nn.ReLU() # No BN before the final activation in this block
-        )
-
+        self.features = nn.Sequential(*features)
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Linear(16 * nf, 4) # Output 4 values for mean and log_var
+        self.classifier = nn.Linear(in_c, 4)
 
     def forward(self, x):
         x = self.features(x)
         x = self.pool(x)
-        x = x.view(x.size(0), -1) # Flatten
+        x = x.view(x.size(0), -1)
         x = self.classifier(x)
         return x
 
@@ -429,7 +404,7 @@ def add_noise_torch(data, mask, ng, pixel_size=2.):
     noise = torch.randn_like(data) * 0.4 / (2 * ng * pixel_size**2)**0.5
     return data + noise * mask
 
-def predict(model_paths, data_obj, device, batch_size):
+def predict(model_paths, data_obj, device, batch_size, nf_scalings, layer_counts):
     all_model_preds = []
 
     test_maps_tensor = torch.from_numpy(data_obj.kappa_test).float().unsqueeze(1)
@@ -438,7 +413,7 @@ def predict(model_paths, data_obj, device, batch_size):
 
     for model_path in model_paths:
         print(f"Loading model: {model_path}")
-        model = KerasStyleCNN().to(device)
+        model = DynamicCNN(nf_scalings, layer_counts).to(device)
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
 
@@ -458,6 +433,14 @@ def predict(model_paths, data_obj, device, batch_size):
     return all_model_preds
 
 def main():
+    # Load hyperparameters from JSON file
+    with open('best_hyperparameters.json', 'r') as f:
+        hyperparams = json.load(f)
+
+    # Prepare lists for DynamicCNN constructor
+    nf_scalings = [hyperparams[f'block_{i}_nf_scaling'] for i in range(6)]
+    layer_counts = [hyperparams[f'block_{i}_layers'] for i in range(6)]
+
     root_dir = os.getcwd()
     print("Root directory is", root_dir)
 
@@ -607,8 +590,8 @@ def main():
     # -- Hyperparameters --
     N_SPLITS = 5 # For 5-fold cross-validation
     N_EPOCHS = 10 # A reasonable default. User may need to adjust for full training runs.
-    BATCH_SIZE = 16 # Reduced batch size to prevent OOM error
-    LEARNING_RATE = 1e-5
+    BATCH_SIZE = hyperparams['batch_size']
+    LEARNING_RATE = hyperparams['lr']
     RANDOM_SEED = 42
 
     # -- Device Setup --
@@ -654,7 +637,7 @@ def main():
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2, pin_memory=True,persistent_workers=True)
 
         # -- Model, Optimizer --
-        model = KerasStyleCNN().to(device)
+        model = DynamicCNN(nf_scalings, layer_counts).to(device)
         optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=5e-5)
 
         # -- Training Loop for one fold --
@@ -719,7 +702,7 @@ def main():
     model_paths = [f'best_model_fold_{i}.pth' for i in range(N_SPLITS)]
 
     # Get predictions from all models: shape (N_ENSEMBLE, N_test, 4)
-    all_preds = predict(model_paths, data_obj, device, BATCH_SIZE)
+    all_preds = predict(model_paths, data_obj, device, BATCH_SIZE, nf_scalings, layer_counts)
 
     # Separate means and log_vars
     # means_all_models has shape (N_ENSEMBLE, N_test, 2)
