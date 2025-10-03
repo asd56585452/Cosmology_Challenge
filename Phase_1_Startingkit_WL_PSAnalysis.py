@@ -317,42 +317,10 @@ class DynamicCNN(nn.Module):
 
         for i in range(len(layer_counts)):
             out_c = int(nf * (2 ** i) * nf_scalings[i])
-            if layer_counts[i] == 1:
-                features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
-                ))
-                in_c = out_c
-            elif layer_counts[i] == 2:
-                features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c//2, 1, padding=1), nn.BatchNorm2d(out_c//2), nn.ReLU()
-                ))   
-                in_c = out_c//2
-            elif layer_counts[i] == 3:
-                features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
-                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
-                ))
-                in_c = out_c
-            elif layer_counts[i] == 4:
-                features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
-                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU()
-                ))
-                in_c = out_c//2
-            elif layer_counts[i] == 5:
-                features.append(nn.Sequential(
-                nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
-                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU(),
-                nn.Conv2d(out_c, out_c//2, 1, padding=0), nn.BatchNorm2d(out_c//2), nn.ReLU(),
-                nn.Conv2d(out_c//2, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()
-                ))
-                in_c = out_c
-            
+            features.append(nn.Sequential(nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()))
+            for ii in range(layer_counts[i]-1):
+                features.append(nn.Sequential(nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()))
+            in_c = out_c
             if i < len(layer_counts) - 1:
                 features.append(nn.AvgPool2d(2, 2))
 
@@ -451,7 +419,8 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         Utility.set_seed(42)
         # -- Hyperparameters to Tune --
         lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
-        batch_size = trial.suggest_int("batch_size", 4, 32, log=True)
+        batch_size = trial.suggest_int("batch_size", 4, 16, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
         nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
         layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 5) for i in range(6)]
 
@@ -460,13 +429,13 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
             kappa_path=kappa_path, label_path=label_path,
             sys_indices=train_indices, data_obj=data_obj, train=True
         )
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
         # Use the pre-generated noisy validation set
-        val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+        val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
 
         # -- Model, Optimizer --
         model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts).to(device)
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
         best_val_score = -np.inf  # Initialize with a very low value
 
@@ -543,7 +512,7 @@ def main():
     N_EPOCHS = 10
     N_TRIALS = 1000
     N_JOBS = 1
-    TIMEOUT = 3600 * 20  # 1 hour
+    TIMEOUT = 3600 * 14  # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
@@ -588,7 +557,7 @@ def main():
 
     study = optuna.create_study(
         study_name="weak_lensing_phase1",
-        storage="sqlite:///optuna_study.db",
+        storage="sqlite:///optuna_study_simple.db",
         load_if_exists=True,
         direction="maximize",
         pruner=optuna.pruners.MedianPruner()
@@ -613,7 +582,7 @@ def main():
 
     # Train final model with best params
     model = DynamicCNN(nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)], layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)]).to(device)
-    optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
+    optimizer = optim.Adam(model.parameters(), lr=best_params['lr'], weight_decay=best_params['weight_decay'])
 
     # For the final training, we use the same training split as Optuna
     final_train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=train_indices, data_obj=data_obj, train=True)
