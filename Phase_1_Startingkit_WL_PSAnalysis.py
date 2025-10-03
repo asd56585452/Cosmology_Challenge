@@ -511,7 +511,7 @@ def main():
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_EPOCHS = 10
     N_TRIALS = 1000
-    N_JOBS = 1
+    N_JOBS = 3
     TIMEOUT = 3600 * 24 * 4 # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
