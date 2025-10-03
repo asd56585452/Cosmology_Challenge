@@ -310,7 +310,7 @@ class WeakLensingDataset(Dataset):
 class DynamicCNN(nn.Module):
     def __init__(self, nf_scalings, layer_counts):
         super(DynamicCNN, self).__init__()
-        nf = 16
+        nf = 8
 
         features = nn.ModuleList()
         in_c = 1
@@ -512,7 +512,7 @@ def main():
     N_EPOCHS = 10
     N_TRIALS = 1000
     N_JOBS = 1
-    TIMEOUT = 3600 * 14  # 1 hour
+    TIMEOUT = 3600 * 24 * 4 # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
@@ -557,7 +557,7 @@ def main():
 
     study = optuna.create_study(
         study_name="weak_lensing_phase1",
-        storage="sqlite:///optuna_study_simple.db",
+        storage="sqlite:///optuna_study_simple_small.db",
         load_if_exists=True,
         direction="maximize",
         pruner=optuna.pruners.MedianPruner()
