@@ -16,7 +16,10 @@ python Phase_1_Startingkit_WL_PSAnalysis.py >> training.log 2>&1
 # aws s3 cp s3://cosmologychallengebucket/public_data.zip .
 # unzip public_data.zip -d public_data
 # rm public_data.zip
+# source /opt/pytorch/bin/activate
+# pip install -r requirements.txt
 # chmod +x /home/ubuntu/Cosmology_Challenge/start_training.sh
 # crontab -e
 # @reboot /usr/bin/tmux new-session -d -s Cosmology_Session '/home/ubuntu/Cosmology_Challenge/start_training.sh'
 # restart
+# tail -f training.log
