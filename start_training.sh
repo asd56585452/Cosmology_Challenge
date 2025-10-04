@@ -11,3 +11,12 @@ source /opt/pytorch/bin/activate
 # 加上 --resume 參數，讓程式從最新的檢查點恢復
 echo "Starting training at $(date)" > training.log
 python Phase_1_Startingkit_WL_PSAnalysis.py >> training.log 2>&1
+
+# cd Cosmology_Challenge
+# aws s3 cp s3://cosmologychallengebucket/public_data.zip .
+# unzip public_data.zip -d public_data
+# rm public_data.zip
+# chmod +x /home/ubuntu/Cosmology_Challenge/start_training.sh
+# crontab -e
+# @reboot /usr/bin/tmux new-session -d -s Cosmology_Session '/home/ubuntu/Cosmology_Challenge/start_training.sh'
+# restart
