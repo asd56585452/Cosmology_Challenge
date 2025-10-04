@@ -9,4 +9,5 @@ source /opt/pytorch/bin/activate
 
 # 執行您的 Python 訓練腳本
 # 加上 --resume 參數，讓程式從最新的檢查點恢復
-python Phase_1_Startingkit_WL_PSAnalysis.py
+echo "Starting training at $(date)" > training.log
+python Phase_1_Startingkit_WL_PSAnalysis.py >> training.log 2>&1
