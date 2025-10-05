@@ -542,8 +542,8 @@ def main():
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_EPOCHS = 10
     N_TRIALS = 1000
-    N_JOBS = 1
-    TIMEOUT = 3600 * 20  # 1 hour
+    N_JOBS = 2
+    TIMEOUT = 3600 * 24  # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
