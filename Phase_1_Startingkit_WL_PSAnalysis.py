@@ -367,6 +367,47 @@ def gaussian_nll_loss(output, target):
     # Return the mean of the total loss
     return (loss_om + loss_s8).mean()
 
+def score_phase1_loss(output, target):
+    """
+    直接優化比賽分數(_score_phase1)的 PyTorch 損失函數。
+    注意：優化器是最小化損失，所以我們的目標是最大化分數，
+    因此這個函數回傳的是「負的分數」。
+    """
+    # 1. 從模型的輸出中分離出預測的平均值 (means) 和 log變異數 (log_var)
+    # output tensor 的格式為 [mean_om, log_var_om, mean_s8, log_var_s8]
+    infer_cosmo = output[:, [0, 2]]  # 預測的 (Ωm, S8) 平均值
+    log_var = output[:, [1, 3]]      # 預測的 log(變異數)
+
+    # 2. 準備計算所需項目
+    # 加上一個極小值 epsilon 是為了避免除以零或對零取 log，增加數值穩定性
+    epsilon = 1e-8
+    # errorbar^2 就是 variance (var)
+    errorbar_sq = torch.exp(log_var) + epsilon
+    
+    true_cosmo = target  # 真實的 (Ωm, S8)
+    
+    # 計算 (真實值 - 預測值)^2
+    sq_error = (true_cosmo - infer_cosmo)**2
+    
+    # 這是評分公式中的常數權重
+    scale_factor = 1000.0
+
+    # 3. 根據評分公式計算每個樣本的分數
+    # 公式: -[ (sq_error/errorbar^2) + log(errorbar^2) + scale_factor * sq_error ]
+    # torch.sum(..., dim=1) 是將 Ωm 和 S8 兩個參數的分數加總
+    score_per_sample = -torch.sum(
+        sq_error / errorbar_sq + torch.log(errorbar_sq) + scale_factor * sq_error,
+        dim=1
+    )
+
+    # 4. 計算整個 batch 的平均分數
+    score = torch.mean(score_per_sample)
+    
+    # 5. 損失 = -分數
+    loss = -score
+    
+    return loss
+
 # %% [markdown]
 # ### Prediction on Test Set
 
@@ -449,7 +490,8 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
                 optimizer.zero_grad()
                 outputs = model(maps)
-                loss = gaussian_nll_loss(outputs, labels)
+                # loss = gaussian_nll_loss(outputs, labels)
+                loss = score_phase1_loss(outputs, labels) 
                 loss.backward()
                 optimizer.step()
                 train_loss += loss.item() * maps.size(0)
@@ -465,7 +507,8 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                     # Maps from the val_loader are already noisy
                     maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
                     outputs = model(maps)
-                    loss = gaussian_nll_loss(outputs, labels)
+                    # loss = gaussian_nll_loss(outputs, labels)
+                    loss = score_phase1_loss(outputs, labels)
                     val_loss += loss.item() * maps.size(0)
                     all_val_preds.append(outputs.cpu().numpy())
                     all_val_labels.append(labels.cpu().numpy())
@@ -510,7 +553,7 @@ def main():
     PUBLIC_DATA_DIR = 'public_data/'
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_EPOCHS = 10
-    N_TRIALS = 10000
+    N_TRIALS = 0
     N_JOBS = 2
     TIMEOUT = 3600 * 24 * 2 # 1 hour
 
@@ -602,7 +645,8 @@ def main():
             maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
             optimizer.zero_grad()
             outputs = model(maps)
-            loss = gaussian_nll_loss(outputs, labels)
+            # loss = gaussian_nll_loss(outputs, labels)
+            loss = score_phase1_loss(outputs, labels)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * maps.size(0)
@@ -617,7 +661,8 @@ def main():
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
                 # No noise addition needed, as the validation set is pre-noised
                 outputs = model(maps)
-                loss = gaussian_nll_loss(outputs, labels)
+                # loss = gaussian_nll_loss(outputs, labels)
+                loss = score_phase1_loss(outputs, labels)
                 val_loss += loss.item() * maps.size(0)
                 all_val_preds.append(outputs.cpu().numpy())
                 all_val_labels.append(labels.cpu().numpy())
