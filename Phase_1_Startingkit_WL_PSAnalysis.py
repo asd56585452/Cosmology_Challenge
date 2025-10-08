@@ -418,11 +418,11 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
     try:
         Utility.set_seed(42)
         # -- Hyperparameters to Tune --
-        lr = trial.suggest_float("lr", 1e-5, 1e-3, log=True)
+        lr = trial.suggest_float("lr", 1e-6, 1e-4, log=True)
         batch_size = trial.suggest_int("batch_size", 4, 16, log=True)
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
-        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
-        layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 5) for i in range(6)]
+        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 2, log=True) for i in range(6)]
+        layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 4) for i in range(6)]
 
         # -- Create Datasets and DataLoaders --
         train_dataset = WeakLensingDataset(
@@ -510,9 +510,9 @@ def main():
     PUBLIC_DATA_DIR = 'public_data/'
     DATA_DIR = PUBLIC_DATA_DIR if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_EPOCHS = 10
-    N_TRIALS = 1000
-    N_JOBS = 3
-    TIMEOUT = 3600 * 24 * 4 # 1 hour
+    N_TRIALS = 10000
+    N_JOBS = 2
+    TIMEOUT = 3600 * 24 * 2 # 1 hour
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.mask = Utility.load_np(data_dir=data_obj.data_dir, file_name=data_obj.mask_file)
