@@ -357,9 +357,9 @@ def main():
     root_dir = os.getcwd()
     USE_PUBLIC_DATASET = True
     DATA_DIR = 'public_data/' if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
-    N_TRIALS = 100
+    N_TRIALS = 1000
     N_JOBS = 1
-    TIMEOUT = 3600 * 12
+    TIMEOUT = 3600 * 48
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.load_test_data()

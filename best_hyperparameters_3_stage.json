@@ -1,0 +1,21 @@
+{
+    "hidden_size": 40,
+    "block_0_nf_scaling": 1.3248595305588837,
+    "block_1_nf_scaling": 1.9838596019572443,
+    "block_2_nf_scaling": 1.8962049261150218,
+    "block_3_nf_scaling": 0.41109926902146365,
+    "block_4_nf_scaling": 0.956750408613387,
+    "block_5_nf_scaling": 1.37213001810681,
+    "block_0_layers": 3,
+    "block_1_layers": 3,
+    "block_2_layers": 1,
+    "block_3_layers": 1,
+    "block_4_layers": 1,
+    "block_5_layers": 1,
+    "batch_size": 16,
+    "lr1": 0.00020931995818656654,
+    "wd1": 3.1391641315302138e-06,
+    "lr2": 3.062706668891833e-05,
+    "wd2": 0.05237757653206548,
+    "lr3": 0.005888512964709403
+}
