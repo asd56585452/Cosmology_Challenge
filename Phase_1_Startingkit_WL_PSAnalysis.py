@@ -24,6 +24,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
@@ -145,52 +146,105 @@ class WeakLensingDataset(Dataset):
         return map_tensor, label_tensor
 
 # %% [markdown]
-# ### 模型架構定義 (DynamicCNN)
+# ### 模型架構定義 (Vision Transformer)
 
 # %%
-class DynamicCNN(nn.Module):
-    def __init__(self, nf_scalings, layer_counts, hidden_size):
-        super(DynamicCNN, self).__init__()
-        nf = 8
-        features = nn.ModuleList()
-        in_c = 1
-        for i in range(len(layer_counts)):
-            out_c = int(nf * (2 ** i) * nf_scalings[i])
-            features.append(nn.Sequential(nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()))
-            for _ in range(layer_counts[i] - 1):
-                features.append(nn.Sequential(nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()))
-            in_c = out_c
-            if i < len(layer_counts) - 1:
-                features.append(nn.AvgPool2d(2, 2))
+class PatchEmbed(nn.Module):
+    """ Image to Patch Embedding """
+    def __init__(self, img_size=(1424, 176), patch_size=(16, 16), in_chans=1, embed_dim=768):
+        super().__init__()
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.grid_size = (img_size[0] // patch_size[0], img_size[1] // patch_size[1])
+        self.num_patches = self.grid_size[0] * self.grid_size[1]
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        # 為了讓維度可以整除，在 forward 中進行 padding
+        # 計算需要的 padding
+        pad_h = (self.patch_size[0] - self.img_size[0] % self.patch_size[0]) % self.patch_size[0]
+        pad_w = (self.patch_size[1] - self.img_size[1] % self.patch_size[1]) % self.patch_size[1]
+
+        # apply padding
+        x = F.pad(x, (0, pad_w, 0, pad_h))
+
+        x = self.proj(x)  # (B, E, H', W')
+        x = x.flatten(2)  # (B, E, N) where N = H'*W'
+        x = x.transpose(1, 2)  # (B, N, E)
+        return x
+
+class VisionTransformer(nn.Module):
+    def __init__(self, img_size, patch_size, in_chans, embed_dim, depth, num_heads, mlp_ratio, hidden_size):
+        super().__init__()
+        self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+
+        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, dim_feedforward=int(embed_dim * mlp_ratio), batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
         
-        self.features = nn.Sequential(*features)
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+        # 將 feature extraction 和 classifier 分開，方便凍結
+        self.feature_extractor = nn.Sequential(
+            self.patch_embed,
+            # Transformer a part of feature extractor
+        )
         
-        # 修改分類器以包含一個可調整的隱藏層
         self.classifier = nn.Sequential(
-            nn.Linear(in_c, hidden_size),
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, 4)
         )
         
-        # 新增兩個獨立的可學習縮放參數
         self.log_var_scaler_om = nn.Parameter(torch.zeros(1))
         self.log_var_scaler_s8 = nn.Parameter(torch.zeros(1))
 
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
     def forward(self, x, apply_scaler=False):
-        x = self.features(x)
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
+        B = x.shape[0]
+        x = self.patch_embed(x)
         
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        
+        # 確保 pos_embed 維度正確
+        if x.size(1) != self.pos_embed.size(1):
+             pos_embed_resized = F.interpolate(
+                 self.pos_embed.permute(0, 2, 1),
+                 size=x.size(1),
+                 mode='linear',
+                 align_corners=False
+             ).permute(0, 2, 1)
+             x = x + pos_embed_resized
+        else:
+             x = x + self.pos_embed
+
+        x = self.transformer_encoder(x)
+
+        # 從 CLS token 取得輸出
+        cls_output = x[:, 0]
+
+        output = self.classifier(cls_output)
+
         if apply_scaler:
-            output = x.clone()
-            # 分別套用縮放參數
-            output[:, 1] = x[:, 1] + self.log_var_scaler_om
-            output[:, 3] = x[:, 3] + self.log_var_scaler_s8
-            return output
-        
-        return x
+            scaled_output = output.clone()
+            scaled_output[:, 1] = output[:, 1] + self.log_var_scaler_om
+            scaled_output[:, 3] = output[:, 3] + self.log_var_scaler_s8
+            return scaled_output
+
+        return output
 
 # %% [markdown]
 # ### 損失函數
@@ -263,9 +317,17 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         Utility.set_seed(42)
         # --- 提議超參數 ---
         # 架構
-        hidden_size = trial.suggest_int("hidden_size", 32, 256, log=True)
-        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
-        layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 3) for i in range(6)]
+        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 7)
+        epochs_stage2 = trial.suggest_int("epochs_stage2", 3, 7)
+        patch_size_factor_h = trial.suggest_categorical("patch_size_factor_h", [8, 16, 32])
+        patch_size_factor_w = trial.suggest_categorical("patch_size_factor_w", [8, 11, 16])
+        patch_size = (patch_size_factor_h, patch_size_factor_w)
+
+        embed_dim = trial.suggest_categorical("embed_dim", [128, 256, 512])
+        depth = trial.suggest_int("depth", 2, 6)
+        num_heads = trial.suggest_categorical("num_heads", [4, 8, 16])
+        mlp_ratio = trial.suggest_float("mlp_ratio", 2.0, 4.0)
+        hidden_size = trial.suggest_int("hidden_size", 64, 512, log=True)
         batch_size = trial.suggest_categorical("batch_size", [8, 16])
         
         # 學習率和權重衰減
@@ -280,34 +342,47 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
         val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
         
-        model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts, hidden_size=hidden_size).to(device)
-        total_epochs = 10
+        model = VisionTransformer(
+            img_size=tuple(data_obj.shape),
+            patch_size=patch_size,
+            in_chans=1,
+            embed_dim=embed_dim,
+            depth=depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            hidden_size=hidden_size
+        ).to(device)
+        total_epochs = epochs_stage1 + epochs_stage2 + 1
 
         # --- 三階段訓練迴圈 ---
         for epoch in range(total_epochs):
             # --- 決定當前階段 ---
-            if epoch < 5:
+            if epoch < epochs_stage1:
                 stage = 1
                 loss_fn = mse_loss
                 if epoch == 0:
                     optimizer = optim.Adam(model.parameters(), lr=lr1, weight_decay=wd1)
-                    print(f"Trial {trial.number}, Stage 1: Training all params with MSE Loss.")
-            elif epoch < 9:
+                    print(f"Trial {trial.number}, Stage 1: Training all params for {epochs_stage1} epochs with MSE Loss.")
+            elif epoch < epochs_stage1 + epochs_stage2:
                 stage = 2
                 loss_fn = gaussian_nll_loss
-                if epoch == 5: # 進入第二階段時，凍結 CNN 並建立新優化器
-                    for param in model.features.parameters():
+                if epoch == epochs_stage1: # 進入第二階段時，凍結 ViT 並建立新優化器
+                    for param in model.patch_embed.parameters():
                         param.requires_grad = False
+                    for param in model.transformer_encoder.parameters():
+                        param.requires_grad = False
+                    model.cls_token.requires_grad = False
+                    model.pos_embed.requires_grad = False
                     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr2, weight_decay=wd2)
-                    print(f"Trial {trial.number}, Stage 2: Training MLP with NLL Loss.")
-            else: # epoch == 9
+                    print(f"Trial {trial.number}, Stage 2: Training MLP for {epochs_stage2} epochs with NLL Loss.")
+            else: # Stage 3
                 stage = 3
                 loss_fn = score_phase1_loss
-                if epoch == 9: # 進入第三階段時，凍結 MLP 並建立新優化器
+                if epoch == epochs_stage1 + epochs_stage2: # 進入第三階段時，凍結 MLP 並建立新優化器
                     for param in model.classifier.parameters():
                         param.requires_grad = False
                     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr3)
-                    print(f"Trial {trial.number}, Stage 3: Training scalers with Score Loss.")
+                    print(f"Trial {trial.number}, Stage 3: Training scalers for 1 epoch with Score Loss.")
             
             # --- 訓練 ---
             model.train()
@@ -320,6 +395,32 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 loss = loss_fn(outputs, labels)
                 loss.backward()
                 optimizer.step()
+
+            # --- 每 Epoch 驗證 ---
+            model.eval()
+            val_preds_list, val_labels_list = [], []
+            with torch.no_grad():
+                for maps, labels in val_loader:
+                    maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                    outputs = model(maps, apply_scaler=(stage == 3))
+                    val_preds_list.append(outputs.cpu())
+                    val_labels_list.append(labels.cpu())
+
+            all_val_preds = torch.cat(val_preds_list).numpy()
+            all_val_labels = torch.cat(val_labels_list).numpy()
+
+            if stage == 1:
+                val_loss = nn.functional.mse_loss(torch.from_numpy(all_val_preds[:, [0, 2]]), torch.from_numpy(all_val_labels))
+                print(f"Epoch {epoch+1} Val MSE: {val_loss.item():.4f}")
+            elif stage == 2:
+                val_loss = gaussian_nll_loss(torch.from_numpy(all_val_preds), torch.from_numpy(all_val_labels))
+                print(f"Epoch {epoch+1} Val NLL: {val_loss.item():.4f}")
+            else: # stage == 3
+                pred_mean = all_val_preds[:, [0, 2]]
+                pred_log_var = all_val_preds[:, [1, 3]]
+                pred_errorbar = np.sqrt(np.exp(pred_log_var))
+                val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
+                print(f"Epoch {epoch+1} Val Score: {val_score:.4f}")
 
         # --- 最終驗證 ---
         model.eval()
@@ -393,8 +494,8 @@ def main():
 
     # --- Optuna 參數搜索 ---
     study = optuna.create_study(
-        study_name="weak_lensing_3_stage",
-        storage="sqlite:///optuna_study_3_stage.db",
+        study_name="weak_lensing_3_stage_v2",
+        storage="sqlite:///optuna_study_3_stage_v2.db",
         load_if_exists=True,
         direction="maximize"
     )
@@ -407,7 +508,7 @@ def main():
     
     print("Best trial:", study.best_trial.params)
     best_params = study.best_trial.params
-    with open("best_hyperparameters_3_stage.json", "w") as f:
+    with open("best_hyperparameters_3_stage_v2.json", "w") as f:
         json.dump(best_params, f, indent=4)
 
     # --- 使用最佳參數進行最終訓練 ---
@@ -420,29 +521,41 @@ def main():
     val_loader = DataLoader(fixed_val_dataset, batch_size=best_params['batch_size'], shuffle=False)
     
     # 建立模型
-    model = DynamicCNN(
-        nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)],
-        layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)],
+    model = VisionTransformer(
+        img_size=tuple(data_obj.shape),
+        patch_size=(best_params['patch_size_factor_h'], best_params['patch_size_factor_w']),
+        in_chans=1,
+        embed_dim=best_params['embed_dim'],
+        depth=best_params['depth'],
+        num_heads=best_params['num_heads'],
+        mlp_ratio=best_params['mlp_ratio'],
         hidden_size=best_params['hidden_size']
     ).to(device)
     
-    total_epochs = 10
+    epochs_stage1 = best_params['epochs_stage1']
+    epochs_stage2 = best_params['epochs_stage2']
+    total_epochs = epochs_stage1 + epochs_stage2 + 1
     best_val_score = -np.inf
     
     # 完全重現三階段訓練流程
     for epoch in range(total_epochs):
-        if epoch < 5:
+        if epoch < epochs_stage1:
             stage, loss_fn = 1, mse_loss
             if epoch == 0:
                 optimizer = optim.Adam(model.parameters(), lr=best_params['lr1'], weight_decay=best_params['wd1'])
-        elif epoch < 9:
+        elif epoch < epochs_stage1 + epochs_stage2:
             stage, loss_fn = 2, gaussian_nll_loss
-            if epoch == 5:
-                for param in model.features.parameters(): param.requires_grad = False
+            if epoch == epochs_stage1:
+                for param in model.patch_embed.parameters():
+                    param.requires_grad = False
+                for param in model.transformer_encoder.parameters():
+                    param.requires_grad = False
+                model.cls_token.requires_grad = False
+                model.pos_embed.requires_grad = False
                 optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=best_params['lr2'], weight_decay=best_params['wd2'])
         else:
             stage, loss_fn = 3, score_phase1_loss
-            if epoch == 9:
+            if epoch == epochs_stage1 + epochs_stage2:
                 for param in model.classifier.parameters(): param.requires_grad = False
                 optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=best_params['lr3'])
 
@@ -458,27 +571,36 @@ def main():
             loss.backward()
             optimizer.step()
 
+        # 每 Epoch 驗證
+        model.eval()
+        val_preds_list, val_labels_list = [], []
+        with torch.no_grad():
+            for maps, labels in val_loader:
+                maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                outputs = model(maps, apply_scaler=(stage == 3))
+                val_preds_list.append(outputs.cpu())
+                val_labels_list.append(labels.cpu())
+
+        all_val_preds = torch.cat(val_preds_list).numpy()
+        all_val_labels = torch.cat(val_labels_list).numpy()
+
+        if stage == 1:
+            val_loss = nn.functional.mse_loss(torch.from_numpy(all_val_preds[:, [0, 2]]), torch.from_numpy(all_val_labels))
+            print(f"Epoch {epoch+1} Val MSE: {val_loss.item():.4f}")
+        elif stage == 2:
+            val_loss = gaussian_nll_loss(torch.from_numpy(all_val_preds), torch.from_numpy(all_val_labels))
+            print(f"Epoch {epoch+1} Val NLL: {val_loss.item():.4f}")
+        else: # stage == 3
+            pred_mean = all_val_preds[:, [0, 2]]
+            pred_log_var = all_val_preds[:, [1, 3]]
+            pred_errorbar = np.sqrt(np.exp(pred_log_var))
+            val_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
+            print(f"Epoch {epoch+1} Val Score: {val_score:.4f}")
+
     # 最終驗證與儲存
-    model.eval()
-    all_val_preds, all_val_labels = [], []
-    with torch.no_grad():
-        for maps, labels in val_loader:
-            maps, labels = maps.to(device), labels.to(device)
-            outputs = model(maps, apply_scaler=True)
-            all_val_preds.append(outputs.cpu().numpy())
-            all_val_labels.append(labels.cpu().numpy())
-    
-    all_val_preds = np.concatenate(all_val_preds, axis=0)
-    all_val_labels = np.concatenate(all_val_labels, axis=0)
-    pred_mean = all_val_preds[:, [0, 2]]
-    pred_log_var = all_val_preds[:, [1, 3]]
-    pred_errorbar = np.sqrt(np.exp(pred_log_var))
-    final_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
-    
-    print(f"Final Model Validation Score: {final_score:.4f}")
     print(f"Final Scalers -> om: {model.log_var_scaler_om.item():.4f}, s8: {model.log_var_scaler_s8.item():.4f}")
-    torch.save(model.state_dict(), 'best_model_3_stage.pth')
-    print("Final model saved to best_model_3_stage.pth")
+    torch.save(model.state_dict(), 'best_model_3_stage_v2.pth')
+    print("Final model saved to best_model_3_stage_v2.pth")
 
     # --- 產生提交檔案 ---
     print("\nGenerating predictions on the test set...")

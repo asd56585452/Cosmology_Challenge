@@ -37,3 +37,9 @@ input_data/covlogPS.npy
 temp_data/
 *.pth
 public_data.zip
+
+# Ignore database files
+*.db
+
+# Ignore generated JSON files
+*.json
