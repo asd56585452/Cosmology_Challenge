@@ -317,8 +317,8 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         Utility.set_seed(42)
         # --- 提議超參數 ---
         # 架構
-        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 7)
-        epochs_stage2 = trial.suggest_int("epochs_stage2", 3, 7)
+        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 5)
+        epochs_stage2 = trial.suggest_int("epochs_stage2", 3, 5)
         patch_size_factor_h = trial.suggest_categorical("patch_size_factor_h", [8, 16, 32])
         patch_size_factor_w = trial.suggest_categorical("patch_size_factor_w", [8, 11, 16])
         patch_size = (patch_size_factor_h, patch_size_factor_w)
@@ -367,13 +367,14 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 stage = 2
                 loss_fn = gaussian_nll_loss
                 if epoch == epochs_stage1: # 進入第二階段時，凍結 ViT 並建立新優化器
-                    for param in model.patch_embed.parameters():
-                        param.requires_grad = False
-                    for param in model.transformer_encoder.parameters():
-                        param.requires_grad = False
-                    model.cls_token.requires_grad = False
-                    model.pos_embed.requires_grad = False
-                    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr2, weight_decay=wd2)
+                    # for param in model.patch_embed.parameters():
+                    #     param.requires_grad = False
+                    # for param in model.transformer_encoder.parameters():
+                    #     param.requires_grad = False
+                    # model.cls_token.requires_grad = False
+                    # model.pos_embed.requires_grad = False
+                    # optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr2, weight_decay=wd2)
+                    optimizer = optim.Adam(model.parameters(), lr=lr2, weight_decay=wd2)
                     print(f"Trial {trial.number}, Stage 2: Training MLP for {epochs_stage2} epochs with NLL Loss.")
             else: # Stage 3
                 stage = 3
@@ -458,7 +459,7 @@ def main():
     root_dir = os.getcwd()
     USE_PUBLIC_DATASET = True
     DATA_DIR = 'public_data/' if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
-    N_TRIALS = 100
+    N_TRIALS = 1000
     N_JOBS = 1
     TIMEOUT = 3600 * 12
 
