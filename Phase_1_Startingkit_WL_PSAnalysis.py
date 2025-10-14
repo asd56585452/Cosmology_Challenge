@@ -262,6 +262,10 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
     try:
         Utility.set_seed(42)
         # --- 提議超參數 ---
+        # 新增: 調整前兩階段的 Epoch 數量
+        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 8)
+        epochs_stage2 = trial.suggest_int("epochs_stage2", 2, 6)
+
         # 架構
         hidden_size = trial.suggest_int("hidden_size", 32, 256, log=True)
         nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
@@ -281,33 +285,34 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
         
         model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts, hidden_size=hidden_size).to(device)
-        total_epochs = 10
+        # 總 Epoch 數現在是動態的
+        total_epochs = epochs_stage1 + epochs_stage2 + 1 # 加上第三階段的 1 個 epoch
 
         # --- 三階段訓練迴圈 ---
         for epoch in range(total_epochs):
             # --- 決定當前階段 ---
-            if epoch < 5:
+            if epoch < epochs_stage1:
                 stage = 1
                 loss_fn = mse_loss
                 if epoch == 0:
                     optimizer = optim.Adam(model.parameters(), lr=lr1, weight_decay=wd1)
-                    print(f"Trial {trial.number}, Stage 1: Training all params with MSE Loss.")
-            elif epoch < 9:
+                    print(f"Trial {trial.number}, Stage 1: Training all params with MSE Loss for {epochs_stage1} epochs.")
+            elif epoch < epochs_stage1 + epochs_stage2:
                 stage = 2
                 loss_fn = gaussian_nll_loss
-                if epoch == 5: # 進入第二階段時，凍結 CNN 並建立新優化器
+                if epoch == epochs_stage1: # 進入第二階段時
                     for param in model.features.parameters():
                         param.requires_grad = False
                     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr2, weight_decay=wd2)
-                    print(f"Trial {trial.number}, Stage 2: Training MLP with NLL Loss.")
-            else: # epoch == 9
+                    print(f"Trial {trial.number}, Stage 2: Training MLP with NLL Loss for {epochs_stage2} epochs.")
+            else: # 最後一個 epoch
                 stage = 3
                 loss_fn = score_phase1_loss
-                if epoch == 9: # 進入第三階段時，凍結 MLP 並建立新優化器
+                if epoch == epochs_stage1 + epochs_stage2: # 進入第三階段時
                     for param in model.classifier.parameters():
                         param.requires_grad = False
                     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr3)
-                    print(f"Trial {trial.number}, Stage 3: Training scalers with Score Loss.")
+                    print(f"Trial {trial.number}, Stage 3: Training scalers with Score Loss for 1 epoch.")
             
             # --- 訓練 ---
             model.train()
@@ -321,30 +326,48 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 loss.backward()
                 optimizer.step()
 
-        # --- 最終驗證 ---
-        model.eval()
-        all_val_preds, all_val_labels = [], []
-        with torch.no_grad():
-            for maps, labels in val_loader:
-                maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-                outputs = model(maps, apply_scaler=True) # 最終驗證時永遠套用 scaler
-                all_val_preds.append(outputs.cpu().numpy())
-                all_val_labels.append(labels.cpu().numpy())
+            # --- 每 Epoch 驗證 ---
+            model.eval()
+            all_val_preds, all_val_labels = [], []
+            with torch.no_grad():
+                for maps, labels in val_loader:
+                    maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+                    # 根據當前階段決定是否套用 scaler
+                    outputs = model(maps, apply_scaler=(stage >= 3))
+                    all_val_preds.append(outputs.cpu().numpy())
+                    all_val_labels.append(labels.cpu().numpy())
+
+            all_val_preds = np.concatenate(all_val_preds, axis=0)
+            all_val_labels = np.concatenate(all_val_labels, axis=0)
+
+            # 根據當前階段選擇評估指標
+            if stage == 1:
+                pred_mean = all_val_preds[:, [0, 2]]
+                val_metric = -nn.functional.mse_loss(torch.from_numpy(pred_mean), torch.from_numpy(all_val_labels)).item()
+                metric_name = "Val MSE"
+            elif stage == 2:
+                val_metric = -gaussian_nll_loss(torch.from_numpy(all_val_preds), torch.from_numpy(all_val_labels)).item()
+                metric_name = "Val NLL"
+            else: # stage 3
+                pred_mean = all_val_preds[:, [0, 2]]
+                pred_log_var = all_val_preds[:, [1, 3]]
+                pred_errorbar = np.sqrt(np.exp(pred_log_var))
+                val_metric = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
+                metric_name = "Val Score"
+
+            print(f"Epoch {epoch+1}/{total_epochs} - {metric_name}: {val_metric:.4f}")
         
-        all_val_preds = np.concatenate(all_val_preds, axis=0)
-        all_val_labels = np.concatenate(all_val_labels, axis=0)
-        pred_mean = all_val_preds[:, [0, 2]]
-        pred_log_var = all_val_preds[:, [1, 3]]
-        pred_errorbar = np.sqrt(np.exp(pred_log_var))
-        final_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
-        
+        # --- 最終回傳分數 ---
+        # Optuna 會以最後一個 epoch 的分數作為最終目標
+        final_score = val_metric
         print(f"Trial {trial.number} Final Score: {final_score:.4f}")
         return final_score
 
     except RuntimeError as e:
         if "CUDA out of memory" in str(e):
-            print(f"Trial {trial.number} failed with CUDA OOM. Returning -1e7.")
-            return -1e7 # 回傳一個極差的分數
+            print(f"Trial {trial.number} failed with CUDA OOM. Pruning trial.")
+            # 使用 Optuna 的剪枝機制
+            raise optuna.exceptions.TrialPruned()
         else:
             raise e
 
@@ -426,23 +449,25 @@ def main():
         hidden_size=best_params['hidden_size']
     ).to(device)
     
-    total_epochs = 10
-    best_val_score = -np.inf
+    # 從 best_params 獲取 epoch 數
+    epochs_stage1 = best_params.get('epochs_stage1', 5) # 提供預設值以防舊的存檔沒有這個參數
+    epochs_stage2 = best_params.get('epochs_stage2', 4)
+    total_epochs = epochs_stage1 + epochs_stage2 + 1
     
     # 完全重現三階段訓練流程
     for epoch in range(total_epochs):
-        if epoch < 5:
+        if epoch < epochs_stage1:
             stage, loss_fn = 1, mse_loss
             if epoch == 0:
                 optimizer = optim.Adam(model.parameters(), lr=best_params['lr1'], weight_decay=best_params['wd1'])
-        elif epoch < 9:
+        elif epoch < epochs_stage1 + epochs_stage2:
             stage, loss_fn = 2, gaussian_nll_loss
-            if epoch == 5:
+            if epoch == epochs_stage1:
                 for param in model.features.parameters(): param.requires_grad = False
                 optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=best_params['lr2'], weight_decay=best_params['wd2'])
         else:
             stage, loss_fn = 3, score_phase1_loss
-            if epoch == 9:
+            if epoch == epochs_stage1 + epochs_stage2:
                 for param in model.classifier.parameters(): param.requires_grad = False
                 optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=best_params['lr3'])
 
