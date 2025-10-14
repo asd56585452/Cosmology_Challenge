@@ -37,3 +37,4 @@ input_data/covlogPS.npy
 temp_data/
 *.pth
 public_data.zip
+optuna_study_3_stage_v2.db
