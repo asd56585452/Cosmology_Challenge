@@ -263,13 +263,13 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         Utility.set_seed(42)
         # --- 提議超參數 ---
         # 新增: 調整前兩階段的 Epoch 數量
-        epochs_stage1 = trial.suggest_int("epochs_stage1", 5, 5)
-        epochs_stage2 = trial.suggest_int("epochs_stage2", 4, 4)
+        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 6)
+        epochs_stage2 = trial.suggest_int("epochs_stage2", 2, 5)
 
         # 架構
         hidden_size = trial.suggest_int("hidden_size", 32, 256, log=True)
         nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
-        layer_counts = [trial.suggest_int(f"block_{i}_layers", 1, 3) for i in range(6)]
+        layer_counts = [trial.suggest_int(f"block_{i}_layers", 0, 4) for i in range(6)]
         batch_size = trial.suggest_categorical("batch_size", [8, 16])
         
         # 學習率和權重衰減
@@ -380,9 +380,9 @@ def main():
     root_dir = os.getcwd()
     USE_PUBLIC_DATASET = True
     DATA_DIR = 'public_data/' if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
-    N_TRIALS = 1
+    N_TRIALS = 1000
     N_JOBS = 1
-    TIMEOUT = 3600 * 48
+    TIMEOUT = 3600 * 20
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.load_test_data()
