@@ -263,13 +263,13 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         Utility.set_seed(42)
         # --- 提議超參數 ---
         # 新增: 調整前兩階段的 Epoch 數量
-        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 6)
-        epochs_stage2 = trial.suggest_int("epochs_stage2", 2, 5)
+        epochs_stage1 = trial.suggest_int("epochs_stage1", 5, 5)
+        epochs_stage2 = trial.suggest_int("epochs_stage2", 4, 4)
 
         # 架構
         hidden_size = trial.suggest_int("hidden_size", 32, 256, log=True)
-        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
-        layer_counts = [trial.suggest_int(f"block_{i}_layers", 0, 4) for i in range(6)]
+        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(2)]
+        layer_counts = [trial.suggest_int(f"block_{i}_layers", 3, 6) for i in range(2)]
         batch_size = trial.suggest_categorical("batch_size", [8, 16])
         
         # 學習率和權重衰減
@@ -382,7 +382,7 @@ def main():
     DATA_DIR = 'public_data/' if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_TRIALS = 1000
     N_JOBS = 1
-    TIMEOUT = 3600 * 20
+    TIMEOUT = 3600 * 24
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.load_test_data()
@@ -416,8 +416,8 @@ def main():
 
     # --- Optuna 參數搜索 ---
     study = optuna.create_study(
-        study_name="weak_lensing_3_stage",
-        storage="sqlite:///optuna_study_3_stage.db",
+        study_name="weak_lensing_3_stage_v3",
+        storage="sqlite:///optuna_study_3_stage_v3.db",
         load_if_exists=True,
         direction="maximize"
     )
@@ -430,7 +430,7 @@ def main():
     
     print("Best trial:", study.best_trial.params)
     best_params = study.best_trial.params
-    with open("best_hyperparameters_3_stage.json", "w") as f:
+    with open("best_hyperparameters_3_stage_v3.json", "w") as f:
         json.dump(best_params, f, indent=4)
 
     # --- 使用最佳參數進行最終訓練 ---
@@ -444,8 +444,8 @@ def main():
     
     # 建立模型
     model = DynamicCNN(
-        nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)],
-        layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)],
+        nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(2)],
+        layer_counts=[best_params[f'block_{i}_layers'] for i in range(2)],
         hidden_size=best_params['hidden_size']
     ).to(device)
     
@@ -502,8 +502,8 @@ def main():
     
     print(f"Final Model Validation Score: {final_score:.4f}")
     print(f"Final Scalers -> om: {model.log_var_scaler_om.item():.4f}, s8: {model.log_var_scaler_s8.item():.4f}")
-    torch.save(model.state_dict(), 'best_model_3_stage.pth')
-    print("Final model saved to best_model_3_stage.pth")
+    torch.save(model.state_dict(), 'best_model_3_stage_v3.pth')
+    print("Final model saved to best_model_3_stage_v3.pth")
 
     # --- 產生提交檔案 ---
     print("\nGenerating predictions on the test set...")
@@ -512,7 +512,7 @@ def main():
     
     data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
     the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
-    zip_file_name = f'Submission_{the_date}_3_stage.zip'
+    zip_file_name = f'Submission_{the_date}_3_stage_v3.zip'
     zip_file = Utility.save_json_zip(
         submission_dir="submissions",
         json_file_name="result.json",
