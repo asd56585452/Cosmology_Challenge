@@ -24,6 +24,7 @@ import random
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
@@ -148,49 +149,156 @@ class WeakLensingDataset(Dataset):
 # ### 模型架構定義 (DynamicCNN)
 
 # %%
-class DynamicCNN(nn.Module):
-    def __init__(self, nf_scalings, layer_counts, hidden_size):
-        super(DynamicCNN, self).__init__()
-        nf = 8
-        features = nn.ModuleList()
-        in_c = 1
-        for i in range(len(layer_counts)):
-            out_c = int(nf * (2 ** i) * nf_scalings[i])
-            features.append(nn.Sequential(nn.Conv2d(in_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()))
-            for _ in range(layer_counts[i] - 1):
-                features.append(nn.Sequential(nn.Conv2d(out_c, out_c, 3, padding=1), nn.BatchNorm2d(out_c), nn.ReLU()))
-            in_c = out_c
-            if i < len(layer_counts) - 1:
-                features.append(nn.AvgPool2d(2, 2))
+# --- 先定義好注意力模組 ---
+class SEBlock(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SEBlock, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        padding = 3 if kernel_size == 7 else 1
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        y = torch.cat([avg_out, max_out], dim=1)
+        y = self.conv(y)
+        return x * self.sigmoid(y)
+
+# --- 接著，定義包含殘差連接的注意力區塊 ---
+class ResAttentionBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResAttentionBlock, self).__init__()
+
+        # 主要路徑
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # 注意力機制
+        self.se = SEBlock(out_channels)
+        self.sa = SpatialAttention()
+
+        # 捷徑 (Shortcut / Residual Connection)
+        self.shortcut = nn.Sequential()
+        # 如果維度不匹配 (輸入/輸出通道數不同，或步長>1導致尺寸變化)，則需要用 1x1 卷積來匹配維度
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        # 主要路徑計算
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+
+        # 應用注意力
+        out = self.se(out)
+        out = self.sa(out)
+
+        # 加入殘差連接
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return out
+
+class ResAttentionCNN(nn.Module):
+    # 在建構子中加入 base_channels 參數
+    def __init__(self, layer_counts, base_channels, hidden_size, dropout_rate=0.5):
+        super(ResAttentionCNN, self).__init__()
+
+        # 初始通道數現在是動態的
+        self.in_channels = base_channels
+
+        # 初始卷積層 (使用 base_channels)
+        self.conv1 = nn.Conv2d(1, base_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(base_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.layers = nn.ModuleList()
+
+        # --- 動態建立 block_configs ---
+        # 規則：每經過一個 stride=2 的 block，通道數加倍
+        current_channels = base_channels
+        block_configs = []
+
+        # 假設我們支援的最大深度是 6
+        max_supported_blocks = 6
+        for i in range(max_supported_blocks):
+            if i == 0: # Block 1
+                stride = 1
+                # Block 1 通道數 = base_channels
+            else: # Block 2, 3, 4...
+                stride = 2
+                current_channels *= 2 # 通道數加倍
+
+            block_configs.append((current_channels, stride))
+
+        # --- 根據傳入的 layer_counts (n_blocks) 來建立 ---
+        n_blocks = len(layer_counts)
+        for i in range(n_blocks):
+            num_layers_in_block = layer_counts[i]
+            out_channels, stride = block_configs[i] # 從動態 config 讀取
+
+            block = self._make_layer(out_channels, num_layers_in_block, stride)
+            self.layers.append(block)
         
-        self.features = nn.Sequential(*features)
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
         
-        # 修改分類器以包含一個可調整的隱藏層
+        # 分類器的輸入通道數 = 最後一個 block 的輸出通道數
+        final_out_channels = self.in_channels
+
         self.classifier = nn.Sequential(
-            nn.Linear(in_c, hidden_size),
+            nn.Linear(final_out_channels, hidden_size),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),
             nn.Linear(hidden_size, 4)
         )
         
-        # 新增兩個獨立的可學習縮放參數
-        self.log_var_scaler_om = nn.Parameter(torch.zeros(1))
-        self.log_var_scaler_s8 = nn.Parameter(torch.zeros(1))
+    def _make_layer(self, out_channels, num_blocks, stride):
+        # ... (與前次回答中的 _make_layer 程式碼相同)
+        if num_blocks == 0:
+            if stride == 1 and self.in_channels == out_channels:
+                 return nn.Identity()
+            else:
+                 shortcut_only_block = nn.Sequential(
+                     nn.Conv2d(self.in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                     nn.BatchNorm2d(out_channels)
+                 )
+                 self.in_channels = out_channels
+                 return shortcut_only_block
+        strides = [stride] + [1]*(num_blocks-1)
+        layers = []
+        for s in strides:
+            layers.append(ResAttentionBlock(self.in_channels, out_channels, s))
+            self.in_channels = out_channels
+        return nn.Sequential(*layers)
 
-    def forward(self, x, apply_scaler=False):
-        x = self.features(x)
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
+    def forward(self, x):
+        # ... (與前次回答中的 forward 程式碼相同)
+        out = self.relu(self.bn1(self.conv1(x)))
+        for layer_block in self.layers:
+            out = layer_block(out)
+        out = self.pool(out)
+        out = out.view(out.size(0), -1)
+        out = self.classifier(out)
         
-        if apply_scaler:
-            output = x.clone()
-            # 分別套用縮放參數
-            output[:, 1] = x[:, 1] + self.log_var_scaler_om
-            output[:, 3] = x[:, 3] + self.log_var_scaler_s8
-            return output
-        
-        return x
+        return out
 
 # %% [markdown]
 # ### 損失函數
@@ -237,7 +345,7 @@ def add_noise_torch(data, mask, ng, pixel_size=2.):
     noise = torch.randn_like(data) * 0.4 / (2 * ng * pixel_size**2)**0.5
     return data + noise * mask
 
-def predict(model, data_obj, device, batch_size, apply_scaler=False):
+def predict(model, data_obj, device, batch_size):
     model.eval()
     all_test_preds = []
     test_maps_tensor = torch.from_numpy(data_obj.kappa_test).float().unsqueeze(1)
@@ -246,7 +354,7 @@ def predict(model, data_obj, device, batch_size, apply_scaler=False):
     with torch.no_grad():
         for maps in test_loader:
             maps = maps[0].to(device)
-            outputs = model(maps, apply_scaler=apply_scaler)
+            outputs = model(maps)
             all_test_preds.append(outputs.cpu().numpy())
     all_test_preds = np.concatenate(all_test_preds, axis=0)
     mean = all_test_preds[:, [0, 2]]
@@ -262,14 +370,15 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
     try:
         Utility.set_seed(42)
         # --- 提議超參數 ---
-        # 新增: 調整前兩階段的 Epoch 數量
         epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 6)
         epochs_stage2 = trial.suggest_int("epochs_stage2", 2, 5)
 
         # 架構
+        base_channels = trial.suggest_categorical("base_channels", [8, 16, 24, 32])
+        n_blocks = trial.suggest_int("n_blocks", 3, 5)
+        layer_counts = [trial.suggest_int(f"block_{i+1}_layers", 0, 3) for i in range(n_blocks)]
         hidden_size = trial.suggest_int("hidden_size", 32, 256, log=True)
-        nf_scalings = [trial.suggest_float(f"block_{i}_nf_scaling", 0.25, 4, log=True) for i in range(6)]
-        layer_counts = [trial.suggest_int(f"block_{i}_layers", 0, 4) for i in range(6)]
+        dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.6)
         batch_size = trial.suggest_categorical("batch_size", [8, 16])
         
         # 學習率和權重衰減
@@ -277,18 +386,22 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
         wd1 = trial.suggest_float("wd1", 1e-6, 1e-2, log=True)
         lr2 = trial.suggest_float("lr2", 1e-6, 1e-4, log=True)
         wd2 = trial.suggest_float("wd2", 1e-5, 1e-1, log=True)
-        lr3 = trial.suggest_float("lr3", 1e-4, 1e-1, log=True)
 
         # --- 設定 ---
         train_dataset = WeakLensingDataset(kappa_path=kappa_path, label_path=label_path, sys_indices=train_indices, data_obj=data_obj)
         train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
         val_loader = DataLoader(fixed_val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
         
-        model = DynamicCNN(nf_scalings=nf_scalings, layer_counts=layer_counts, hidden_size=hidden_size).to(device)
-        # 總 Epoch 數現在是動態的
-        total_epochs = epochs_stage1 + epochs_stage2 + 1 # 加上第三階段的 1 個 epoch
+        model = ResAttentionCNN(
+            layer_counts=layer_counts,
+            base_channels=base_channels,
+            hidden_size=hidden_size,
+            dropout_rate=dropout_rate
+        ).to(device)
 
-        # --- 三階段訓練迴圈 ---
+        total_epochs = epochs_stage1 + epochs_stage2
+
+        # --- 兩階段訓練迴圈 ---
         for epoch in range(total_epochs):
             # --- 決定當前階段 ---
             if epoch < epochs_stage1:
@@ -297,22 +410,16 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 if epoch == 0:
                     optimizer = optim.Adam(model.parameters(), lr=lr1, weight_decay=wd1)
                     print(f"Trial {trial.number}, Stage 1: Training all params with MSE Loss for {epochs_stage1} epochs.")
-            elif epoch < epochs_stage1 + epochs_stage2:
+            else: # Stage 2
                 stage = 2
                 loss_fn = gaussian_nll_loss
                 if epoch == epochs_stage1: # 進入第二階段時
-                    for param in model.features.parameters():
-                        param.requires_grad = False
+                    # Freeze feature extractor layers
+                    for name, param in model.named_parameters():
+                        if 'classifier' not in name and 'log_var_scaler' not in name:
+                            param.requires_grad = False
                     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr2, weight_decay=wd2)
-                    print(f"Trial {trial.number}, Stage 2: Training MLP with NLL Loss for {epochs_stage2} epochs.")
-            else: # 最後一個 epoch
-                stage = 3
-                loss_fn = score_phase1_loss
-                if epoch == epochs_stage1 + epochs_stage2: # 進入第三階段時
-                    for param in model.classifier.parameters():
-                        param.requires_grad = False
-                    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr3)
-                    print(f"Trial {trial.number}, Stage 3: Training scalers with Score Loss for 1 epoch.")
+                    print(f"Trial {trial.number}, Stage 2: Training Classifier with NLL Loss for {epochs_stage2} epochs.")
             
             # --- 訓練 ---
             model.train()
@@ -321,7 +428,7 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
                 maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
                 optimizer.zero_grad()
-                outputs = model(maps, apply_scaler=(stage == 3))
+                outputs = model(maps)
                 loss = loss_fn(outputs, labels)
                 loss.backward()
                 optimizer.step()
@@ -332,8 +439,7 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
             with torch.no_grad():
                 for maps, labels in val_loader:
                     maps, labels = maps.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-                    # 根據當前階段決定是否套用 scaler
-                    outputs = model(maps, apply_scaler=(stage >= 3)) 
+                    outputs = model(maps)
                     all_val_preds.append(outputs.cpu().numpy())
                     all_val_labels.append(labels.cpu().numpy())
             
@@ -346,19 +452,21 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 val_metric = -nn.functional.mse_loss(torch.from_numpy(pred_mean), torch.from_numpy(all_val_labels)).item()
                 metric_name = "Val MSE"
                 print(f"Epoch {epoch+1}/{total_epochs} - {metric_name}: {val_metric:.4f}")
-            else:
-                val_metric = -gaussian_nll_loss(torch.from_numpy(all_val_preds), torch.from_numpy(all_val_labels)).item()
-                metric_name = "Val NLL"
-                print(f"Epoch {epoch+1}/{total_epochs} - {metric_name}: {val_metric:.4f}")
+            else: # Stage 2
                 pred_mean = all_val_preds[:, [0, 2]]
                 pred_log_var = all_val_preds[:, [1, 3]]
                 pred_errorbar = np.sqrt(np.exp(pred_log_var))
                 val_metric = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
                 metric_name = "Val Score"
                 print(f"Epoch {epoch+1}/{total_epochs} - {metric_name}: {val_metric:.4f}")
+
+            # --- Early Stopping ---
+            trial.report(val_metric, epoch)
+            if trial.should_prune():
+                print(f"Trial {trial.number} pruned at epoch {epoch+1}.")
+                raise optuna.exceptions.TrialPruned()
         
         # --- 最終回傳分數 ---
-        # Optuna 會以最後一個 epoch 的分數作為最終目標
         final_score = val_metric
         print(f"Trial {trial.number} Final Score: {final_score:.4f}")
         return final_score
@@ -366,7 +474,6 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
     except RuntimeError as e:
         if "CUDA out of memory" in str(e):
             print(f"Trial {trial.number} failed with CUDA OOM. Pruning trial.")
-            # 使用 Optuna 的剪枝機制
             raise optuna.exceptions.TrialPruned()
         else:
             raise e
@@ -378,7 +485,7 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
 def main():
     Utility.set_seed(42)
     root_dir = os.getcwd()
-    USE_PUBLIC_DATASET = True
+    USE_PUBLIC_DATASET = False
     DATA_DIR = 'public_data/' if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_TRIALS = 1000
     N_JOBS = 1
@@ -392,8 +499,8 @@ def main():
     mask_tensor = torch.from_numpy(data_obj.mask).float().unsqueeze(0).unsqueeze(0).to(device)
 
     # --- 準備訓練/驗證資料 ---
-    kappa_path = os.path.join(DATA_DIR, 'WIDE12H_bin2_2arcmin_kappa.npy')
-    label_path = os.path.join(DATA_DIR, 'label.npy')
+    kappa_path = os.path.join(DATA_DIR, data_obj.kappa_file)
+    label_path = os.path.join(DATA_DIR, data_obj.label_file)
     all_labels = np.load(label_path)
     Nsys = all_labels.shape[1]
     indices = np.arange(Nsys)
@@ -416,8 +523,8 @@ def main():
 
     # --- Optuna 參數搜索 ---
     study = optuna.create_study(
-        study_name="weak_lensing_3_stage",
-        storage="sqlite:///optuna_study_3_stage.db",
+        study_name="weak_lensing_2_stage_resnet",
+        storage="sqlite:///optuna_study_2_stage_resnet.db",
         load_if_exists=True,
         direction="maximize"
     )
@@ -430,7 +537,7 @@ def main():
     
     print("Best trial:", study.best_trial.params)
     best_params = study.best_trial.params
-    with open("best_hyperparameters_3_stage.json", "w") as f:
+    with open("best_hyperparameters_2_stage_resnet.json", "w") as f:
         json.dump(best_params, f, indent=4)
 
     # --- 使用最佳參數進行最終訓練 ---
@@ -442,34 +549,36 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=best_params['batch_size'], shuffle=True)
     val_loader = DataLoader(fixed_val_dataset, batch_size=best_params['batch_size'], shuffle=False)
     
+    # 從 best_params 重建 layer_counts
+    n_blocks = best_params['n_blocks']
+    layer_counts = [best_params[f'block_{i+1}_layers'] for i in range(n_blocks)]
+
     # 建立模型
-    model = DynamicCNN(
-        nf_scalings=[best_params[f'block_{i}_nf_scaling'] for i in range(6)],
-        layer_counts=[best_params[f'block_{i}_layers'] for i in range(6)],
-        hidden_size=best_params['hidden_size']
+    model = ResAttentionCNN(
+        layer_counts=layer_counts,
+        base_channels=best_params['base_channels'],
+        hidden_size=best_params['hidden_size'],
+        dropout_rate=best_params['dropout_rate']
     ).to(device)
     
     # 從 best_params 獲取 epoch 數
-    epochs_stage1 = best_params.get('epochs_stage1', 5) # 提供預設值以防舊的存檔沒有這個參數
+    epochs_stage1 = best_params.get('epochs_stage1', 5)
     epochs_stage2 = best_params.get('epochs_stage2', 4)
-    total_epochs = epochs_stage1 + epochs_stage2 + 1
+    total_epochs = epochs_stage1 + epochs_stage2
     
-    # 完全重現三階段訓練流程
+    # 重現兩階段訓練流程
     for epoch in range(total_epochs):
         if epoch < epochs_stage1:
             stage, loss_fn = 1, mse_loss
             if epoch == 0:
                 optimizer = optim.Adam(model.parameters(), lr=best_params['lr1'], weight_decay=best_params['wd1'])
-        elif epoch < epochs_stage1 + epochs_stage2:
+        else: # Stage 2
             stage, loss_fn = 2, gaussian_nll_loss
             if epoch == epochs_stage1:
-                for param in model.features.parameters(): param.requires_grad = False
+                for name, param in model.named_parameters():
+                    if 'classifier' not in name and 'log_var_scaler' not in name:
+                        param.requires_grad = False
                 optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=best_params['lr2'], weight_decay=best_params['wd2'])
-        else:
-            stage, loss_fn = 3, score_phase1_loss
-            if epoch == epochs_stage1 + epochs_stage2:
-                for param in model.classifier.parameters(): param.requires_grad = False
-                optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=best_params['lr3'])
 
         # 訓練
         model.train()
@@ -478,7 +587,7 @@ def main():
             maps, labels = maps.to(device), labels.to(device)
             maps = add_noise_torch(maps, mask_tensor, data_obj.ng, data_obj.pixelsize_arcmin)
             optimizer.zero_grad()
-            outputs = model(maps, apply_scaler=(stage == 3))
+            outputs = model(maps)
             loss = loss_fn(outputs, labels)
             loss.backward()
             optimizer.step()
@@ -489,7 +598,7 @@ def main():
     with torch.no_grad():
         for maps, labels in val_loader:
             maps, labels = maps.to(device), labels.to(device)
-            outputs = model(maps, apply_scaler=True)
+            outputs = model(maps)
             all_val_preds.append(outputs.cpu().numpy())
             all_val_labels.append(labels.cpu().numpy())
     
@@ -501,18 +610,17 @@ def main():
     final_score = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
     
     print(f"Final Model Validation Score: {final_score:.4f}")
-    print(f"Final Scalers -> om: {model.log_var_scaler_om.item():.4f}, s8: {model.log_var_scaler_s8.item():.4f}")
-    torch.save(model.state_dict(), 'best_model_3_stage.pth')
-    print("Final model saved to best_model_3_stage.pth")
+    torch.save(model.state_dict(), 'best_model_2_stage_resnet.pth')
+    print("Final model saved to best_model_2_stage_resnet.pth")
 
     # --- 產生提交檔案 ---
     print("\nGenerating predictions on the test set...")
-    mean, errorbar = predict(model, data_obj, device, best_params['batch_size'], apply_scaler=True)
+    mean, errorbar = predict(model, data_obj, device, best_params['batch_size'])
     print("Predictions generated.")
     
     data = {"means": mean.tolist(), "errorbars": errorbar.tolist()}
     the_date = datetime.datetime.now().strftime("%y-%m-%d-%H-%M")
-    zip_file_name = f'Submission_{the_date}_3_stage.zip'
+    zip_file_name = f'Submission_{the_date}_2_stage_resnet.zip'
     zip_file = Utility.save_json_zip(
         submission_dir="submissions",
         json_file_name="result.json",
