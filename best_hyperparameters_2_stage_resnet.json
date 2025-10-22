@@ -1,0 +1,16 @@
+{
+    "epochs_stage1": 6,
+    "epochs_stage2": 5,
+    "base_channels": 22,
+    "n_blocks": 3,
+    "block_1_layers": 3,
+    "block_2_layers": 0,
+    "block_3_layers": 2,
+    "hidden_size": 232,
+    "dropout_rate": 0.28671764801668687,
+    "batch_size": 16,
+    "lr1": 0.0002409347727042062,
+    "wd1": 1.2307123527504215e-06,
+    "lr2": 8.333784234566256e-05,
+    "wd2": 0.0001564509582159479
+}

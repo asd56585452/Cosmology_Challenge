@@ -370,11 +370,13 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
     try:
         Utility.set_seed(42)
         # --- 提議超參數 ---
-        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, 6)
-        epochs_stage2 = trial.suggest_int("epochs_stage2", 2, 5)
+        max_epochs_stage1 = 6
+        max_epochs_stage2 = 5
+        epochs_stage1 = trial.suggest_int("epochs_stage1", 3, max_epochs_stage1)
+        epochs_stage2 = trial.suggest_int("epochs_stage2", 2, max_epochs_stage2)
 
         # 架構
-        base_channels = trial.suggest_categorical("base_channels", [8, 16, 24, 32])
+        base_channels = trial.suggest_categorical("base_channels", [8, 10, 14, 22])
         n_blocks = trial.suggest_int("n_blocks", 3, 5)
         layer_counts = [trial.suggest_int(f"block_{i+1}_layers", 0, 3) for i in range(n_blocks)]
         hidden_size = trial.suggest_int("hidden_size", 32, 256, log=True)
@@ -459,12 +461,12 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
                 val_metric = Score._score_phase1(true_cosmo=all_val_labels, infer_cosmo=pred_mean, errorbar=pred_errorbar)
                 metric_name = "Val Score"
                 print(f"Epoch {epoch+1}/{total_epochs} - {metric_name}: {val_metric:.4f}")
+            # trial.report(val_metric, epoch-epochs_stage1)
 
-            # --- Early Stopping ---
-            trial.report(val_metric, epoch)
-            if trial.should_prune():
-                print(f"Trial {trial.number} pruned at epoch {epoch+1}.")
-                raise optuna.exceptions.TrialPruned()
+            # # --- Early Stopping ---
+            # if trial.should_prune():
+            #     print(f"Trial {trial.number} pruned at epoch {epoch+1}.")
+            #     raise optuna.exceptions.TrialPruned()
         
         # --- 最終回傳分數 ---
         final_score = val_metric
@@ -485,11 +487,11 @@ def objective(trial, data_obj, device, mask_tensor, train_indices, fixed_val_dat
 def main():
     Utility.set_seed(42)
     root_dir = os.getcwd()
-    USE_PUBLIC_DATASET = False
+    USE_PUBLIC_DATASET = True
     DATA_DIR = 'public_data/' if USE_PUBLIC_DATASET else os.path.join(root_dir, 'input_data/')
     N_TRIALS = 1000
     N_JOBS = 1
-    TIMEOUT = 3600 * 20
+    TIMEOUT = 3600 * 24 * 2
 
     data_obj = Data(data_dir=DATA_DIR, USE_PUBLIC_DATASET=USE_PUBLIC_DATASET)
     data_obj.load_test_data()
